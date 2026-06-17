@@ -32,7 +32,19 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.1.0-step1-data-layer"
+MODEL_VERSION = "0.2.0-step2-elo-engine"
+
+# ---------------------------------------------------------------------------
+# Elo model parameters (architecture §4.2)
+# ---------------------------------------------------------------------------
+# World Football Elo family defaults. The engine exposes exactly the knobs the
+# architecture enumerates — K, home advantage, optional margin-of-victory — and
+# deliberately no tournament-importance weighting (single K). EloConfig pulls its
+# defaults from here so the script, engine, and DB replay all agree.
+ELO_DEFAULT_RATING = 1500.0   # every team's rating before its first match
+ELO_K = 40.0                  # update step size
+ELO_HOME_ADVANTAGE = 100.0    # rating points added to a non-neutral home side
+ELO_USE_MOV = True            # scale updates by goal-difference index
 
 # ---------------------------------------------------------------------------
 # Data sources (architecture §6). Each entry is fetched into its own subfolder
