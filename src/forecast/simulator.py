@@ -6,11 +6,13 @@ the title. Everything is vectorised over the simulation axis with NumPy and driv
 by a single seeded generator, so 50k runs finish in seconds and two runs with the
 same seed are identical (§7).
 
-Match model (Step 3 placeholder, replaced by Dixon-Coles in Step 4): each team's
-Elo maps to a Poisson scoring rate, so one goal process yields win/draw/loss *and*
-scorelines — the latter needed for group tiebreakers. Knockouts level after 90'
-play 30' of the same process at the proportional rate (λ/3); still level → 50/50
-(decision #7).
+Match model (Step 4): the blended Dixon-Coles + Elo model in ``match_model``. Group
+fixtures sample a full scoreline (outcome from the fixed-weight blend, scoreline
+texture from the Dixon-Coles conditional) — the scoreline is needed for group
+tiebreakers. Knockouts need only the winner: the blend gives win/draw/loss, and a
+tie after 90' plays 30' of the same Poisson process at the proportional rate (λ/3),
+still level → 50/50 (decision #7). Host home advantage is applied only to host
+nations' non-neutral group games (§4.3); knockout venues are treated as neutral.
 
 The Round-of-32 third-placed-team allocation uses FIFA's literal 495-row table via
 ``tournament`` — the correctness gate of §4.4.
@@ -24,7 +26,18 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from .config import BASE_GOALS, ELO_GOAL_SCALE, MODEL_VERSION, N_SIMS, SIM_SEED
+from .config import HOST_NATIONS, MODEL_VERSION, N_SIMS, SIM_SEED
+from .dixon_coles import outcome_probs
+from .match_model import (
+    MatchModelParams,
+    blend,
+    elo_outcome,
+    fit_match_model,
+    predict,
+    scoreline_distribution,
+    team_lambdas,
+)
+from .ratings import _is_neutral
 from .tournament import (
     BRACKET,
     FINAL_MATCH_NO,
@@ -40,34 +53,63 @@ from .tournament import (
 
 # Stage keys, ordered; each is the probability of *reaching* that stage (title = win).
 STAGES = ("r32", "r16", "qf", "sf", "final", "title")
-_MIN_LAMBDA = 0.05
 
 
-def elo_to_lambdas(elo_home, elo_away):
-    """Map a pair of Elo ratings to Poisson scoring rates ``(λ_home, λ_away)``.
+def _sample_scoreline(matrix, p_blend, n, rng):
+    """Sample ``n`` scorelines: outcome from the blend, scoreline from DC texture.
 
-    Accepts scalars or NumPy arrays. The Elo difference becomes a goal supremacy
-    that is split around the neutral total ``BASE_GOALS``. Placeholder for Step 4.
+    ``matrix`` is the Dixon-Coles scoreline pmf for the fixture; ``p_blend`` is the
+    fixed-weight-blended ``(pH, pD, pA)``. The outcome (home/draw/away) is drawn from
+    the blend, then a scoreline is drawn from ``matrix`` *conditioned* on that
+    outcome region — so the W/D/L totals match the blend while goal counts keep the
+    Dixon-Coles shape needed for group tiebreakers. Returns ``(home_goals, away_goals)``.
     """
-    supremacy = (np.asarray(elo_home, float) - np.asarray(elo_away, float)) * ELO_GOAL_SCALE
-    lam_home = np.clip((BASE_GOALS + supremacy) / 2.0, _MIN_LAMBDA, None)
-    lam_away = np.clip((BASE_GOALS - supremacy) / 2.0, _MIN_LAMBDA, None)
-    return lam_home, lam_away
+    g = matrix.shape[0]
+    cell = np.arange(g * g)
+    xs, ys = cell // g, cell % g
+    flat = matrix.ravel()
+
+    def region_cdf(mask):
+        p = flat * mask
+        return np.cumsum(p) / p.sum()
+
+    cdfs = {0: region_cdf(xs > ys), 1: region_cdf(xs == ys), 2: region_cdf(xs < ys)}
+    pH, pD, _ = (float(x) for x in p_blend)
+
+    u_out = rng.random(n)
+    u_score = rng.random(n)
+    outcome = np.where(u_out < pH, 0, np.where(u_out < pH + pD, 1, 2))
+    cells = np.empty(n, dtype=np.int64)
+    for code, cdf in cdfs.items():
+        m = outcome == code
+        if m.any():
+            cells[m] = np.clip(np.searchsorted(cdf, u_score[m], side="right"), 0, g * g - 1)
+    return xs[cells], ys[cells]
 
 
-def _play_knockout(elo, home_idx, away_idx, rng):
-    """Resolve a knockout match for every sim; return the advancing team indices."""
+def _play_knockout(params, elo, home_idx, away_idx, rng):
+    """Resolve a knockout match for every sim; return the advancing team indices.
+
+    Only the winner is needed, so the blended win/draw/loss settles regulation; a tie
+    plays 30' of the Dixon-Coles Poisson process at the proportional (1/3) rate, then
+    a 50/50 shootout (decision #7). Knockout venues are treated as neutral.
+    """
     n = home_idx.shape[0]
-    lam_h, lam_a = elo_to_lambdas(elo[home_idx], elo[away_idx])
-    gh, ga = rng.poisson(lam_h), rng.poisson(lam_a)
-    home_adv = gh > ga
-    tie = gh == ga
+    eh_, ea_ = elo[home_idx], elo[away_idx]
+    lam_h, lam_a = team_lambdas(params, eh_, ea_, host_home=False)
+    p_dc = outcome_probs(lam_h, lam_a, params.rho)
+    p_elo = elo_outcome(params, eh_, ea_, host_home=False)
+    pH, pD, _ = blend(p_dc, p_elo, params.blend_weight)
+
+    u = rng.random(n)
+    home_win = u < pH
+    tie = (u >= pH) & (u < pH + pD)
     # Extra time: 30 further minutes at the proportional (1/3) rate.
-    eh, ea = rng.poisson(lam_h / 3.0), rng.poisson(lam_a / 3.0)
-    et_home = eh > ea
-    et_tie = eh == ea
+    et_h, et_a = rng.poisson(lam_h / 3.0), rng.poisson(lam_a / 3.0)
+    et_home = et_h > et_a
+    et_tie = et_h == et_a
     coin = rng.random(n) < 0.5  # penalties: 50/50
-    home_advances = home_adv | (tie & et_home) | (tie & et_tie & coin)
+    home_advances = home_win | (tie & et_home) | (tie & et_tie & coin)
     return np.where(home_advances, home_idx, away_idx)
 
 
@@ -111,17 +153,21 @@ def _load_participants(conn: sqlite3.Connection, groups: dict[str, list[str]]):
 
 
 def _load_group_fixtures(conn, groups, name_to_idx):
-    """Return ``{letter: [(local_a, local_b, result_or_None), ...]}`` (6 each).
+    """Return ``{letter: [(local_a, local_b, result_or_None, host_home), ...]}``.
 
     ``local_*`` index into the group's four teams (groups.json order); result is the
-    played ``"h:a"`` scoreline or ``None`` for an unplayed fixture to be simulated.
+    played ``"h:a"`` scoreline or ``None`` for an unplayed fixture to be simulated;
+    ``host_home`` is True when the home team is a host nation playing a non-neutral
+    game — the only place genuine home advantage applies (§4.3). Six per group.
     """
     team_group = {t: letter for letter in GROUP_LETTERS for t in groups[letter]}
     local = {t: i for letter in GROUP_LETTERS for i, t in enumerate(groups[letter])}
+    hosts = set(HOST_NATIONS)
     fixtures: dict[str, list] = {letter: [] for letter in GROUP_LETTERS}
     rows = conn.execute(
         """
-        SELECT h.name AS home, a.name AS away, m.result AS result
+        SELECT h.name AS home, a.name AS away, m.result AS result,
+               m.feature_snapshot AS fs
         FROM matches m
         JOIN teams h ON h.id = m.home
         JOIN teams a ON a.id = m.away
@@ -132,7 +178,10 @@ def _load_group_fixtures(conn, groups, name_to_idx):
         if team_group.get(r["home"]) != team_group.get(r["away"]):
             continue  # not a group fixture (would be a knockout — none exist yet)
         letter = team_group[r["home"]]
-        fixtures[letter].append((local[r["home"]], local[r["away"]], r["result"]))
+        host_home = r["home"] in hosts and not _is_neutral(r["fs"])
+        fixtures[letter].append(
+            (local[r["home"]], local[r["away"]], r["result"], host_home)
+        )
     for letter in GROUP_LETTERS:
         fixtures[letter].sort(key=lambda f: (f[0], f[1]))  # stable RNG-draw order
         if len(fixtures[letter]) != 6:
@@ -140,21 +189,21 @@ def _load_group_fixtures(conn, groups, name_to_idx):
     return fixtures
 
 
-def _simulate_group(group_elo, fixtures, n, rng):
+def _simulate_group(params, group_elo, fixtures, n, rng):
     """Simulate one group; return per-sim (winner, runner, third) local indices and
     the third-placed team's cross-group ranking score."""
     points = np.zeros((4, n))
     gd = np.zeros((4, n))
     gf = np.zeros((4, n))
-    for a, b, result in fixtures:
+    for a, b, result, host_home in fixtures:
         if result is not None:
             hs, as_ = (int(x) for x in result.split(":"))
             ga = np.full(n, hs)
             gb = np.full(n, as_)
         else:
-            lam_a, lam_b = elo_to_lambdas(group_elo[a], group_elo[b])
-            ga = rng.poisson(lam_a, n)
-            gb = rng.poisson(lam_b, n)
+            matrix = scoreline_distribution(params, group_elo[a], group_elo[b], host_home)
+            p_blend = predict(params, group_elo[a], group_elo[b], host_home)
+            ga, gb = _sample_scoreline(matrix, p_blend, n, rng)
         points[a] += 3 * (ga > gb) + (ga == gb)
         points[b] += 3 * (gb > ga) + (ga == gb)
         gf[a] += ga
@@ -178,12 +227,19 @@ def simulate(
     conn: sqlite3.Connection,
     n_sims: int = N_SIMS,
     seed: int = SIM_SEED,
+    params: MatchModelParams | None = None,
 ) -> dict:
     """Run the Monte Carlo simulation and return per-team stage/title probabilities.
+
+    ``params`` is the blended match model (architecture §4.3). When ``None`` it is
+    fit once from the database (leak-free, point-in-time Elo); callers may inject an
+    explicit ``MatchModelParams`` to avoid a fit (the unit tests do this).
 
     Returns ``{"n_sims", "seed", "teams": [{name, team_id, probs:{stage:p}}...]}``
     sorted by title probability descending.
     """
+    if params is None:
+        params = fit_match_model(conn)
     rng = np.random.default_rng(seed)
     groups = load_groups()
     names, team_ids, elos, name_to_idx = _load_participants(conn, groups)
@@ -201,7 +257,7 @@ def simulate(
     third_scores = np.empty((12, n))
     for gi, letter in enumerate(GROUP_LETTERS):
         gelo = elos[group_global[letter]]
-        w, r, t, tscore = _simulate_group(gelo, fixtures[letter], n, rng)
+        w, r, t, tscore = _simulate_group(params, gelo, fixtures[letter], n, rng)
         gg = group_global[letter]
         winner_idx[letter] = gg[w]
         runner_idx[letter] = gg[r]
@@ -245,10 +301,12 @@ def simulate(
     # --- Knockouts -----------------------------------------------------------
     match_winner: dict[int, np.ndarray] = {}
     for match_no, (home_spec, away_spec) in R32_MATCHES.items():
-        match_winner[match_no] = _play_knockout(elos, resolve(home_spec), resolve(away_spec), rng)
+        match_winner[match_no] = _play_knockout(
+            params, elos, resolve(home_spec), resolve(away_spec), rng
+        )
     for match_no, (src_a, src_b) in BRACKET.items():
         match_winner[match_no] = _play_knockout(
-            elos, match_winner[src_a], match_winner[src_b], rng
+            params, elos, match_winner[src_a], match_winner[src_b], rng
         )
 
     # Reaching a stage = winning the previous round's match.
