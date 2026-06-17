@@ -13,8 +13,8 @@ The project is built in steps following the architecture's §8 build sequence.
 - ✅ **Step 1 — Project scaffold & data layer**
 - ✅ **Step 2 — Elo engine (point-in-time)**
 - ✅ **Step 3 — Monte Carlo simulator (the spine)**
-- ✅ **Step 4 — Scoreline model & blend** *(this step)*
-- ⬜ Step 5 — Calibration harness
+- ✅ **Step 4 — Scoreline model & blend**
+- ✅ **Step 5 — Calibration harness** *(this step)*
 - ⬜ Step 6 — Update loop & snapshots
 - ⬜ Step 7 — API & dashboard
 
@@ -24,13 +24,15 @@ The project is built in steps following the architecture's §8 build sequence.
 datasets/        raw data, one subfolder per source (never interlinked)
   martj42/       international results 1872–present (incl. WC2026 fixtures)
   eloratings/    World Football Elo (feature / sanity check)
-  odds_api/      deferred (needs API key) — placeholder
+  odds_api/      The Odds API (needs key); committed *.sample.json for offline use
   transfermarkt/ deferred (optional, scrape) — placeholder
   fifa_2026/     groups + FIFA Annex C third-place table (bracket structure)
-src/forecast/    application package (config, db, loader, elo, ratings,
-                 tournament, dixon_coles, match_model, simulator)
+src/forecast/    application package (config, db, loader, elo, ratings, tournament,
+                 dixon_coles, match_model, simulator, metrics, market, calibration)
 scripts/         CLIs: fetch_data, init_db, load_data, build_ratings,
-                 fetch_fifa_structure, run_simulation, backtest_match_model
+                 fetch_fifa_structure, run_simulation, backtest_match_model,
+                 evaluate_calibration
+reports/         generated calibration artifacts (git-ignored, regenerable)
 tests/           offline pytest suite
 docs/            architecture overview
 ```
@@ -126,6 +128,41 @@ python scripts/backtest_match_model.py                 # default cutoff 2018-01-
 python scripts/backtest_match_model.py --cutoff 2016-01-01
 ```
 
+## Calibration harness (Step 5)
+
+The harness measures **calibration, not winner-calling** (decision #2): when the app
+says 20%, that should happen ~20% of the time. It scores forecasts with **RPS**
+(primary, order-aware for win/draw/loss), **Brier**, and **log-loss** (`metrics.py`),
+backtests the model on historical internationals with a strict time-split and
+point-in-time Elo (no leakage), and saves a reliability diagram.
+
+It also adds the **market as a reference** (`market.py`): The Odds API h2h prices are
+de-vigged (margin removed) and compared three ways — the **odds-free** fundamentals
+model, the **market**, and a market-aware **model** that fixed-weight-blends the two
+(`MARKET_BLEND_WEIGHT`). The goal is to *match* the market, not beat it (decision #6);
+the odds-free row tests whether the fundamentals add signal beyond the price.
+
+```bash
+python scripts/evaluate_calibration.py                 # offline: uses [SAMPLE] odds
+python scripts/evaluate_calibration.py --cutoff 2016-01-01 --market-weight 0.5
+```
+
+Outputs print to the console and are written to `reports/` (`reliability_step5.png`,
+`step5_calibration_report.md`).
+
+**Live market odds.** The Odds API needs a key. Set it as an environment variable
+(never commit it), then fetch:
+
+```bash
+export ODDS_API_KEY=your_key            # or set it in your environment config
+python scripts/fetch_data.py --source odds_api   # writes datasets/odds_api/wc2026_h2h_odds.json
+python scripts/evaluate_calibration.py           # now uses the live odds
+```
+
+The free tier serves only *upcoming* odds, so scored market calibration accrues as
+fixtures complete with odds captured beforehand; the committed
+`wc2026_h2h_odds.sample.json` lets the harness run offline in the meantime.
+
 ## Tests
 
 ```bash
@@ -136,5 +173,6 @@ The suite is offline (uses a small in-repo fixture CSV and an in-memory DB) and
 covers schema creation, loader idempotency, the hand-checked Elo engine
 (`test_elo.py`), leak-free replay (`test_ratings.py`), the FIFA R32 third-place
 table and bracket gate (`test_tournament.py`), the Dixon-Coles scoreline math and
-blended match model (`test_dixon_coles.py`, `test_match_model.py`), and the
-simulator (`test_simulator.py`).
+blended match model (`test_dixon_coles.py`, `test_match_model.py`), the simulator
+(`test_simulator.py`), and the calibration harness — scoring rules, odds de-vig, and
+the three-way comparison (`test_metrics.py`, `test_market.py`, `test_calibration.py`).

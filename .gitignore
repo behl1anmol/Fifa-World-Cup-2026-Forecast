@@ -4,6 +4,13 @@ forecast.db
 *.db-journal
 *.sqlite3-journal
 
+# Forecast app: generated calibration artifacts (regenerable via the harness)
+reports/
+
+# Forecast app: live Odds API snapshot (fetched with ODDS_API_KEY; the committed
+# *.sample.json illustrative file is kept under version control)
+datasets/odds_api/wc2026_h2h_odds.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
