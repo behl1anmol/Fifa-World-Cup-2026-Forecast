@@ -6,8 +6,10 @@ counts, monotonicity, and conditioning on completed results.
 """
 from __future__ import annotations
 
+import dataclasses
 from itertools import combinations
 
+from forecast.match_model import MatchModelParams
 from forecast.simulator import STAGES, simulate, write_predictions
 from forecast.tournament import GROUP_LETTERS, load_groups
 
@@ -94,6 +96,30 @@ def test_conditioning_eliminates_a_team_that_lost_every_group_game(conn):
     assert probs[a[0]]["r32"] == 0.0
     # The group's clear winner advances every time.
     assert probs[a[1]]["r32"] == 1.0
+
+
+def test_injected_params_match_default_autofit(conn):
+    # With no ratings_history the auto-fit falls back to defaults, so an explicit
+    # default-params run must equal the params=None run exactly.
+    _build_wc_db(conn)
+    auto = simulate(conn, n_sims=1200, seed=11)
+    explicit = simulate(conn, n_sims=1200, seed=11, params=MatchModelParams.default())
+    assert {t["name"]: t["probs"] for t in auto["teams"]} == {
+        t["name"]: t["probs"] for t in explicit["teams"]
+    }
+
+
+def test_blend_weight_changes_the_forecast(conn):
+    # The blend is genuinely wired: leaning fully on Dixon-Coles vs fully on Elo
+    # must produce different title probabilities under the same seed.
+    _build_wc_db(conn)
+    dc_only = dataclasses.replace(MatchModelParams.default(), blend_weight=1.0)
+    elo_only = dataclasses.replace(MatchModelParams.default(), blend_weight=0.0)
+    a = simulate(conn, n_sims=2000, seed=5, params=dc_only)
+    b = simulate(conn, n_sims=2000, seed=5, params=elo_only)
+    pa = {t["name"]: t["probs"]["title"] for t in a["teams"]}
+    pb = {t["name"]: t["probs"]["title"] for t in b["teams"]}
+    assert pa != pb
 
 
 def test_write_predictions_persists_one_row_per_team(conn):

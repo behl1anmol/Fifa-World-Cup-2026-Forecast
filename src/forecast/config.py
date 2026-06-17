@@ -32,7 +32,7 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.3.0-step3-simulator"
+MODEL_VERSION = "0.4.0-step4-dixoncoles"
 
 # ---------------------------------------------------------------------------
 # Monte Carlo simulator (architecture §4.4, §7)
@@ -40,12 +40,37 @@ MODEL_VERSION = "0.3.0-step3-simulator"
 N_SIMS = 50_000          # remaining-bracket simulations per run (§4.4)
 SIM_SEED = 20_260_617    # default RNG seed; reproducible runs (§7)
 
-# Step-3 placeholder goal model: map Elo to a pair of Poisson scoring rates so a
-# single process yields win/draw/loss *and* scorelines (needed for group
-# tiebreakers and proportional extra time). Step 4 replaces this with Dixon-Coles;
-# BASE_GOALS / ELO_GOAL_SCALE are not yet calibrated (that is Step 5).
-BASE_GOALS = 2.6         # expected total goals in a neutral, evenly-matched game
-ELO_GOAL_SCALE = 0.0035  # goal supremacy per Elo point of difference
+# ---------------------------------------------------------------------------
+# Match-outcome model (architecture §4.3, decision #8) — Step 4
+# ---------------------------------------------------------------------------
+# Goals follow the published FIFA-tournament form λ = exp(β₀ + β₁·EloDiff), with a
+# Dixon-Coles low-score (τ/ρ) correction and a host-only home term layered on top
+# (Gilch & Müller 2018). These constants are the *seed* defaults used by
+# ``MatchModelParams.default()`` so the simulator and tests can run without a fit;
+# ``fit_match_model`` overwrites them from historical data (leak-free, via
+# ``ratings_history.elo_before``).
+#
+# Seed scale: β₀ = ln(BASE_GOALS / 2) puts an even neutral match at BASE_GOALS/2
+# goals per side; ELO_GOAL_SCALE_LOG is β₁ in log-rate space per Elo point.
+BASE_GOALS = 2.6                 # expected total goals in a neutral, even game
+ELO_GOAL_SCALE_LOG = 0.0017      # β₁: log-goal supremacy per Elo point (seed)
+HOST_HOME_GOALS_LOG = 0.20       # additive log-rate home term for host nations (seed)
+
+# Dixon-Coles low-score correction and scoreline support.
+DC_RHO = -0.05                   # τ correlation parameter (seed; re-fit in Step 4)
+DC_MAX_GOALS = 10                # scoreline matrix is (0..DC_MAX_GOALS)²
+
+# Elo-implied outcome: draw curve pD = DRAW_BASE · exp(-|ΔElo| / DRAW_DECAY).
+DRAW_BASE = 0.27                 # draw probability for an even matchup (seed)
+DRAW_DECAY = 350.0               # Elo-points scale over which draws decay (seed)
+
+# Fixed-weight blend of the Dixon-Coles outcome with the Elo-implied outcome
+# (decision #8: fixed weight, not learned stacking). Configurable; Step 5 may tune.
+BLEND_WEIGHT = 0.5               # weight on the Dixon-Coles outcome in [0, 1]
+
+# Time-decay half-life (days) for weighting historical matches in the fit, so
+# recent international form counts more (Dixon-Coles down-weighting idea).
+DC_FIT_HALF_LIFE_DAYS = 365.0 * 8.0  # ~8 years
 
 # ---------------------------------------------------------------------------
 # Elo model parameters (architecture §4.2)

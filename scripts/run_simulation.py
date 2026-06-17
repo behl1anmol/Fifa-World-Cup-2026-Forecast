@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run the Monte Carlo bracket simulator and print live title/stage odds.
 
-Ensures the DB is loaded and Elo is built, runs 50,000 seeded simulations of the
-remaining bracket (conditioned on completed group results), writes a prediction
-snapshot (architecture §5), and prints ranked title odds — the Step 3 acceptance
-check. Re-running with the same seed yields identical numbers.
+Ensures the DB is loaded and Elo is built, fits the blended Dixon-Coles + Elo match
+model (Step 4), runs 50,000 seeded simulations of the remaining bracket (conditioned
+on completed group results), writes a prediction snapshot (architecture §5), and
+prints ranked title odds. Re-running with the same seed yields identical numbers.
 
 Usage:
     python scripts/run_simulation.py
@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from forecast.config import DB_PATH, MARTJ42_RESULTS_CSV, N_SIMS, SIM_SEED  # noqa: E402
 from forecast.db import connect, create_schema, row_count  # noqa: E402
 from forecast.loader import load  # noqa: E402
+from forecast.match_model import fit_match_model  # noqa: E402
 from forecast.ratings import replay_history  # noqa: E402
 from forecast.simulator import STAGES, simulate, write_predictions  # noqa: E402
 
@@ -41,10 +42,16 @@ def main() -> int:
     if conn.execute("SELECT COUNT(*) FROM teams WHERE current_elo IS NOT NULL").fetchone()[0] == 0:
         replay_history(conn)
 
-    result = simulate(conn, n_sims=args.sims, seed=args.seed)
+    params = fit_match_model(conn)
+    result = simulate(conn, n_sims=args.sims, seed=args.seed, params=params)
     run_id = write_predictions(conn, result)
 
     print(f"Database : {DB_PATH}")
+    print(
+        f"Model    : β₀={params.base_goals:.3f} β₁={params.elo_goal_scale:.5f} "
+        f"host={params.host_home_goals:.3f} ρ={params.rho:.4f} "
+        f"draw_base={params.draw_base:.3f} blend_w={params.blend_weight:.2f}"
+    )
     print(f"Sims     : {result['n_sims']:,}   seed={result['seed']}   run_id={run_id[:8]}")
     print("-" * 72)
     header = f"{'#':>2}  {'team':<22}" + "".join(f"{s.upper():>8}" for s in STAGES)

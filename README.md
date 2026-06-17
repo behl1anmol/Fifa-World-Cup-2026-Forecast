@@ -12,8 +12,8 @@ The project is built in steps following the architecture's §8 build sequence.
 
 - ✅ **Step 1 — Project scaffold & data layer**
 - ✅ **Step 2 — Elo engine (point-in-time)**
-- ✅ **Step 3 — Monte Carlo simulator (the spine)** *(this step)*
-- ⬜ Step 4 — Scoreline model & blend
+- ✅ **Step 3 — Monte Carlo simulator (the spine)**
+- ✅ **Step 4 — Scoreline model & blend** *(this step)*
 - ⬜ Step 5 — Calibration harness
 - ⬜ Step 6 — Update loop & snapshots
 - ⬜ Step 7 — API & dashboard
@@ -28,9 +28,9 @@ datasets/        raw data, one subfolder per source (never interlinked)
   transfermarkt/ deferred (optional, scrape) — placeholder
   fifa_2026/     groups + FIFA Annex C third-place table (bracket structure)
 src/forecast/    application package (config, db, loader, elo, ratings,
-                 tournament, simulator)
+                 tournament, dixon_coles, match_model, simulator)
 scripts/         CLIs: fetch_data, init_db, load_data, build_ratings,
-                 fetch_fifa_structure, run_simulation
+                 fetch_fifa_structure, run_simulation, backtest_match_model
 tests/           offline pytest suite
 docs/            architecture overview
 ```
@@ -98,10 +98,33 @@ python scripts/run_simulation.py                 # same seed => identical number
 python scripts/run_simulation.py --sims 10000 --seed 7
 ```
 
-Match outcomes currently come from an Elo→Poisson goal model (a Step 3 placeholder
-that Step 4 replaces with Dixon-Coles); extra time continues the goal process at the
-proportional rate and a level shootout is decided 50/50. Simulator tunables
-(`N_SIMS`, `SIM_SEED`, `BASE_GOALS`, `ELO_GOAL_SCALE`) live in `config.py`.
+Match outcomes come from the Step 4 blended model (below); extra time continues the
+goal process at the proportional rate and a level shootout is decided 50/50.
+Simulator tunables `N_SIMS` / `SIM_SEED` live in `config.py`.
+
+## Match model (Step 4)
+
+The simulator resolves fixtures with a **Dixon-Coles scoreline model blended with
+the Elo-implied outcome** (architecture §4.3, decision #8). Expected goals follow the
+published FIFA-tournament form `λ = exp(β₀ + β₁·EloDiff)` (Gilch & Müller 2018) — so
+the self-computed Elo stays the single strength backbone (§4.2) — with a re-fit
+Dixon-Coles low-score (τ/ρ) correction and a host-only home advantage layered on top.
+The Dixon-Coles win/draw/loss is averaged with the Elo-logistic win/draw/loss at a
+**fixed configurable weight** (`BLEND_WEIGHT`, default 0.5; not learned stacking,
+which overfits ~10 matches/team/year). Group fixtures sample a full scoreline (for
+tiebreakers); knockouts need only the winner.
+
+Parameters are re-estimated from historical internationals using point-in-time Elo
+(`ratings_history.elo_before`), so the fit is leak-free. The model tunables
+(`BLEND_WEIGHT`, `DC_RHO`, `DC_MAX_GOALS`, `DRAW_BASE`, `DRAW_DECAY`,
+`DC_FIT_HALF_LIFE_DAYS`) seed `MatchModelParams.default()` and live in `config.py`.
+
+```bash
+# Backtest draw calibration: fit before a cutoff, predict the held-out tail,
+# compare predicted vs empirical draw rate (blended / Dixon-Coles / Elo-only).
+python scripts/backtest_match_model.py                 # default cutoff 2018-01-01
+python scripts/backtest_match_model.py --cutoff 2016-01-01
+```
 
 ## Tests
 
@@ -112,5 +135,6 @@ pytest -q
 The suite is offline (uses a small in-repo fixture CSV and an in-memory DB) and
 covers schema creation, loader idempotency, the hand-checked Elo engine
 (`test_elo.py`), leak-free replay (`test_ratings.py`), the FIFA R32 third-place
-table and bracket gate (`test_tournament.py`), and the simulator
-(`test_simulator.py`).
+table and bracket gate (`test_tournament.py`), the Dixon-Coles scoreline math and
+blended match model (`test_dixon_coles.py`, `test_match_model.py`), and the
+simulator (`test_simulator.py`).
