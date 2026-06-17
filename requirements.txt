@@ -7,6 +7,9 @@ numpy>=1.24
 scipy>=1.10
 statsmodels>=0.14
 
+# Plotting (Step 5 reliability diagram; static PNG via the Agg backend)
+matplotlib>=3.5
+
 # Serving layer (used from Step 7; declared up front for a single env)
 fastapi>=0.110
 uvicorn>=0.27

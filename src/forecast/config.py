@@ -21,6 +21,15 @@ ODDS_API_DIR = DATASETS_DIR / "odds_api"
 TRANSFERMARKT_DIR = DATASETS_DIR / "transfermarkt"
 FIFA_2026_DIR = DATASETS_DIR / "fifa_2026"
 
+# Generated calibration artifacts (git-ignored; regenerable via the harness).
+REPORTS_DIR = PROJECT_ROOT / "reports"
+
+# Odds API h2h snapshots: the live fetch overwrites ODDS_LIVE_FILE; ODDS_SAMPLE_FILE
+# is a committed, clearly-labelled illustrative sample so the calibration harness and
+# tests run offline (architecture §6, §4.5).
+ODDS_LIVE_FILE = ODDS_API_DIR / "wc2026_h2h_odds.json"
+ODDS_SAMPLE_FILE = ODDS_API_DIR / "wc2026_h2h_odds.sample.json"
+
 # Default on-disk SQLite database (git-ignored; rebuildable from datasets/).
 DB_PATH = Path(os.environ.get("FORECAST_DB", PROJECT_ROOT / "forecast.db"))
 
@@ -32,7 +41,7 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.4.0-step4-dixoncoles"
+MODEL_VERSION = "0.5.0-step5-calibration"
 
 # ---------------------------------------------------------------------------
 # Monte Carlo simulator (architecture §4.4, §7)
@@ -71,6 +80,18 @@ BLEND_WEIGHT = 0.5               # weight on the Dixon-Coles outcome in [0, 1]
 # Time-decay half-life (days) for weighting historical matches in the fit, so
 # recent international form counts more (Dixon-Coles down-weighting idea).
 DC_FIT_HALF_LIFE_DAYS = 365.0 * 8.0  # ~8 years
+
+# ---------------------------------------------------------------------------
+# Calibration harness (architecture §4.5, decision #2, #6) — Step 5
+# ---------------------------------------------------------------------------
+# Strict time-split: the match model is fit only on matches *before* this date and
+# evaluated on the held-out tail, using point-in-time Elo (no leakage, §7).
+CALIBRATION_CUTOFF = "2018-01-01"
+RELIABILITY_BINS = 10            # bins for the reliability (calibration) diagram
+
+# Fixed-weight blend of the de-vigged market price with the fundamentals model, to
+# form the market-aware "model" row (decision #6, #8). Weight is on the market.
+MARKET_BLEND_WEIGHT = 0.5        # weight on the market in [0, 1]
 
 # ---------------------------------------------------------------------------
 # Elo model parameters (architecture §4.2)
