@@ -11,8 +11,8 @@ The project is built in steps following the architecture's §8 build sequence.
 ## Build status
 
 - ✅ **Step 1 — Project scaffold & data layer**
-- ✅ **Step 2 — Elo engine (point-in-time)** *(this step)*
-- ⬜ Step 3 — Monte Carlo simulator (the spine)
+- ✅ **Step 2 — Elo engine (point-in-time)**
+- ✅ **Step 3 — Monte Carlo simulator (the spine)** *(this step)*
 - ⬜ Step 4 — Scoreline model & blend
 - ⬜ Step 5 — Calibration harness
 - ⬜ Step 6 — Update loop & snapshots
@@ -26,9 +26,11 @@ datasets/        raw data, one subfolder per source (never interlinked)
   eloratings/    World Football Elo (feature / sanity check)
   odds_api/      deferred (needs API key) — placeholder
   transfermarkt/ deferred (optional, scrape) — placeholder
-  fifa_2026/     fixtures come from martj42 — note only
-src/forecast/    application package (config, db, loader, data_sources)
-scripts/         CLIs: fetch_data, init_db, load_data
+  fifa_2026/     groups + FIFA Annex C third-place table (bracket structure)
+src/forecast/    application package (config, db, loader, elo, ratings,
+                 tournament, simulator)
+scripts/         CLIs: fetch_data, init_db, load_data, build_ratings,
+                 fetch_fifa_structure, run_simulation
 tests/           offline pytest suite
 docs/            architecture overview
 ```
@@ -78,6 +80,29 @@ The tunables — `ELO_K`, `ELO_HOME_ADVANTAGE`, `ELO_USE_MOV`, `ELO_DEFAULT_RATI
 reference only; a uniform scale offset is expected (we seed every team at 1500 with
 a single K), so judge it by ranking, not absolute numbers.
 
+## Simulator (Step 3)
+
+The spine (architecture §4.4): a seeded NumPy Monte Carlo that plays the remaining
+2026 bracket 50,000 times — conditioned on completed group results — and reports
+each team's probability of reaching every stage and of winning the title. The
+Round-of-32 third-placed-team allocation uses FIFA's literal 495-combination table
+(Annex C), the app's highest-risk input, validated as a correctness gate.
+
+```bash
+# 1. Fetch + validate the FIFA bracket structure into datasets/fifa_2026/.
+#    (Committed already; this is the regeneration path — the only network step.)
+python scripts/fetch_fifa_structure.py
+
+# 2. Run 50k seeded sims, write a prediction snapshot, print ranked title odds.
+python scripts/run_simulation.py                 # same seed => identical numbers
+python scripts/run_simulation.py --sims 10000 --seed 7
+```
+
+Match outcomes currently come from an Elo→Poisson goal model (a Step 3 placeholder
+that Step 4 replaces with Dixon-Coles); extra time continues the goal process at the
+proportional rate and a level shootout is decided 50/50. Simulator tunables
+(`N_SIMS`, `SIM_SEED`, `BASE_GOALS`, `ELO_GOAL_SCALE`) live in `config.py`.
+
 ## Tests
 
 ```bash
@@ -86,4 +111,6 @@ pytest -q
 
 The suite is offline (uses a small in-repo fixture CSV and an in-memory DB) and
 covers schema creation, loader idempotency, the hand-checked Elo engine
-(`test_elo.py`), and leak-free replay (`test_ratings.py`).
+(`test_elo.py`), leak-free replay (`test_ratings.py`), the FIFA R32 third-place
+table and bracket gate (`test_tournament.py`), and the simulator
+(`test_simulator.py`).
