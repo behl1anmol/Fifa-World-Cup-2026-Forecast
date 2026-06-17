@@ -1,3 +1,9 @@
+# Forecast app: local SQLite database (rebuildable from datasets/)
+forecast.db
+*.db
+*.db-journal
+*.sqlite3-journal
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
