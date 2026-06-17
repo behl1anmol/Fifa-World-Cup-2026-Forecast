@@ -32,7 +32,20 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.2.0-step2-elo-engine"
+MODEL_VERSION = "0.3.0-step3-simulator"
+
+# ---------------------------------------------------------------------------
+# Monte Carlo simulator (architecture §4.4, §7)
+# ---------------------------------------------------------------------------
+N_SIMS = 50_000          # remaining-bracket simulations per run (§4.4)
+SIM_SEED = 20_260_617    # default RNG seed; reproducible runs (§7)
+
+# Step-3 placeholder goal model: map Elo to a pair of Poisson scoring rates so a
+# single process yields win/draw/loss *and* scorelines (needed for group
+# tiebreakers and proportional extra time). Step 4 replaces this with Dixon-Coles;
+# BASE_GOALS / ELO_GOAL_SCALE are not yet calibrated (that is Step 5).
+BASE_GOALS = 2.6         # expected total goals in a neutral, evenly-matched game
+ELO_GOAL_SCALE = 0.0035  # goal supremacy per Elo point of difference
 
 # ---------------------------------------------------------------------------
 # Elo model parameters (architecture §4.2)
