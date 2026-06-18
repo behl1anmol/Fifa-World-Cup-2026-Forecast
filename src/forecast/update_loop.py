@@ -32,10 +32,10 @@ import hashlib
 import json
 import sqlite3
 
-from .config import MODEL_VERSION, N_SIMS, SIM_SEED
+from .config import BASELINE_RUN_ID, MODEL_VERSION, N_SIMS, SIM_SEED
 from .loader import _scoreline, _team_id_map
 from .match_model import fit_match_model
-from .ratings import replay_history
+from .ratings import pretournament_elos, replay_history
 from .simulator import simulate, write_predictions
 
 # WC2026 fixtures are tagged with this stage and fall on/after this date — the same
@@ -159,18 +159,54 @@ def run_update(
     }
 
 
+def write_baseline_snapshot(
+    conn: sqlite3.Connection, n_sims: int = N_SIMS, seed: int = SIM_SEED
+) -> dict:
+    """Persist the reconstructed **pre-tournament** baseline forecast (architecture §7).
+
+    Simulates the bracket from scratch — ignoring completed 2026 results and using
+    each team's reconstructed pre-tournament Elo (``ratings.pretournament_elos``) — and
+    writes it under the reserved ``run_id = BASELINE_RUN_ID``. This is the fixed "pre"
+    side of the dashboard's "pre-tourney vs now" toggle.
+
+    The match-model *params* are the current leak-free fit (their drift from the
+    completed group games is negligible); the snapshot's pre-tournament character comes
+    from the pre-tournament Elo plus simulating every group fixture. Idempotent: the
+    reserved run_id + ``write_predictions`` upsert mean re-running overwrites in place.
+    """
+    params = fit_match_model(conn)
+    elos = pretournament_elos(conn)
+    result = simulate(
+        conn,
+        n_sims=n_sims,
+        seed=seed,
+        params=params,
+        condition_on_results=False,
+        elo_override=elos,
+    )
+    write_predictions(conn, result, run_id=BASELINE_RUN_ID)
+    return {"run_id": BASELINE_RUN_ID, "result": result, "n_sims": n_sims, "seed": seed}
+
+
 # ---------------------------------------------------------------------------
 # Snapshot history (read side; consumed by Step 7)
 # ---------------------------------------------------------------------------
 def list_runs(conn: sqlite3.Connection) -> list[dict]:
-    """All snapshot runs, newest first: ``[{run_id, model_version, timestamp, n_teams}]``."""
+    """Live snapshot runs, newest first: ``[{run_id, model_version, timestamp, n_teams}]``.
+
+    The reserved pre-tournament baseline (``BASELINE_RUN_ID``) is excluded — it is a
+    fixed reference, not part of the live forecast history, and must never be mistaken
+    for "now" (fetch it explicitly via ``get_snapshot(conn, BASELINE_RUN_ID)``).
+    """
     rows = conn.execute(
         """
         SELECT run_id, model_version, MAX(timestamp) AS timestamp, COUNT(*) AS n_teams
         FROM predictions
+        WHERE run_id != ?
         GROUP BY run_id
         ORDER BY timestamp DESC, run_id
-        """
+        """,
+        (BASELINE_RUN_ID,),
     ).fetchall()
     return [
         {

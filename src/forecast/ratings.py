@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from .config import ELORATINGS_DIR
+from .config import ELORATINGS_DIR, WC_START_DATE
 from .elo import EloConfig, update_ratings
 
 
@@ -118,6 +118,40 @@ def replay_history(
         "teams_rated": len(ratings),
         "history_rows": len(history_rows),
     }
+
+
+def pretournament_elos(
+    conn: sqlite3.Connection, before_date: str = WC_START_DATE
+) -> dict[str, float]:
+    """Return ``{team_name: elo}`` as of just before the tournament (architecture §7).
+
+    For each team, its rating is the ``elo_after`` of its most recent match dated
+    strictly before ``before_date`` (point-in-time, via ``ratings_history``). Teams
+    with no prior match — none in practice for WC2026 participants — default to
+    ``ELO_DEFAULT_RATING``. This is the leak-free "pre-tourney" rating that powers the
+    baseline forecast, so the "pre-tourney vs now" comparison is meaningful rather than
+    re-using ratings already nudged by the group-stage results.
+
+    Ordering by ``(m.date, m.id)`` and overwriting as we go leaves each team keyed to
+    its latest pre-cutoff rating; ``ratings_history`` is already leak-free (§4.2).
+    """
+    rows = conn.execute(
+        """
+        SELECT rh.team_id AS team_id, t.name AS name, rh.elo_after AS elo_after
+        FROM ratings_history rh
+        JOIN matches m ON m.id = rh.match_id
+        JOIN teams t ON t.id = rh.team_id
+        WHERE m.date < ?
+        ORDER BY m.date, m.id
+        """,
+        (before_date,),
+    ).fetchall()
+    elos: dict[str, float] = {}
+    for r in rows:
+        elos[r["name"]] = r["elo_after"]
+    # Teams with no pre-cutoff match are simply absent; the simulator's elo_override
+    # path falls back to ELO_DEFAULT_RATING for any participant not present here.
+    return elos
 
 
 def load_reference_elo() -> dict[str, float]:

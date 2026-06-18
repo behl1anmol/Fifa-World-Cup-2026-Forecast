@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from .config import HOST_NATIONS, MODEL_VERSION, N_SIMS, SIM_SEED
+from .config import ELO_DEFAULT_RATING, HOST_NATIONS, MODEL_VERSION, N_SIMS, SIM_SEED
 from .dixon_coles import outcome_probs
 from .match_model import (
     MatchModelParams,
@@ -133,32 +133,57 @@ def _build_third_place_lookup():
     return mask_to_row, src_by_row
 
 
-def _load_participants(conn: sqlite3.Connection, groups: dict[str, list[str]]):
-    """Return (names, team_ids, elos, name_to_idx) for the 48 participants."""
+def _load_participants(
+    conn: sqlite3.Connection,
+    groups: dict[str, list[str]],
+    elo_override: dict[str, float] | None = None,
+):
+    """Return (names, team_ids, elos, name_to_idx) for the 48 participants.
+
+    ``elo_override`` (Step 7) supplies ratings explicitly — e.g. reconstructed
+    pre-tournament Elo for the baseline forecast — instead of ``teams.current_elo``;
+    any participant absent from the override falls back to ``ELO_DEFAULT_RATING``. With
+    no override the live ``current_elo`` is used and a missing rating is an error
+    (run ``build_ratings`` first).
+    """
     names = [t for letter in GROUP_LETTERS for t in groups[letter]]
+    name_set = set(names)
     rows = {
         r["name"]: r
-        for r in conn.execute(
-            "SELECT id, name, current_elo FROM teams WHERE current_elo IS NOT NULL"
-        )
-        if r["name"] in set(names)
+        for r in conn.execute("SELECT id, name, current_elo FROM teams")
+        if r["name"] in name_set
     }
-    missing = [n for n in names if n not in rows]
-    if missing:
-        raise ValueError(f"WC2026 teams missing current_elo (run build_ratings): {missing}")
+    missing_ids = [n for n in names if n not in rows]
+    if missing_ids:
+        raise ValueError(f"WC2026 teams not found in DB: {missing_ids}")
+
     name_to_idx = {n: i for i, n in enumerate(names)}
     team_ids = np.array([rows[n]["id"] for n in names], dtype=np.int64)
-    elos = np.array([rows[n]["current_elo"] for n in names], dtype=float)
+
+    if elo_override is not None:
+        elos = np.array(
+            [float(elo_override.get(n, ELO_DEFAULT_RATING)) for n in names], dtype=float
+        )
+    else:
+        missing_elo = [n for n in names if rows[n]["current_elo"] is None]
+        if missing_elo:
+            raise ValueError(
+                f"WC2026 teams missing current_elo (run build_ratings): {missing_elo}"
+            )
+        elos = np.array([rows[n]["current_elo"] for n in names], dtype=float)
     return names, team_ids, elos, name_to_idx
 
 
-def _load_group_fixtures(conn, groups, name_to_idx):
+def _load_group_fixtures(conn, groups, name_to_idx, condition_on_results=True):
     """Return ``{letter: [(local_a, local_b, result_or_None, host_home), ...]}``.
 
     ``local_*`` index into the group's four teams (groups.json order); result is the
     played ``"h:a"`` scoreline or ``None`` for an unplayed fixture to be simulated;
     ``host_home`` is True when the home team is a host nation playing a non-neutral
     game — the only place genuine home advantage applies (§4.3). Six per group.
+
+    ``condition_on_results=False`` (Step 7) forces every fixture to ``None`` so the
+    whole group stage is simulated from scratch — used for the pre-tournament baseline.
     """
     team_group = {t: letter for letter in GROUP_LETTERS for t in groups[letter]}
     local = {t: i for letter in GROUP_LETTERS for i, t in enumerate(groups[letter])}
@@ -179,8 +204,9 @@ def _load_group_fixtures(conn, groups, name_to_idx):
             continue  # not a group fixture (would be a knockout — none exist yet)
         letter = team_group[r["home"]]
         host_home = r["home"] in hosts and not _is_neutral(r["fs"])
+        result = r["result"] if condition_on_results else None
         fixtures[letter].append(
-            (local[r["home"]], local[r["away"]], r["result"], host_home)
+            (local[r["home"]], local[r["away"]], result, host_home)
         )
     for letter in GROUP_LETTERS:
         fixtures[letter].sort(key=lambda f: (f[0], f[1]))  # stable RNG-draw order
@@ -228,12 +254,20 @@ def simulate(
     n_sims: int = N_SIMS,
     seed: int = SIM_SEED,
     params: MatchModelParams | None = None,
+    condition_on_results: bool = True,
+    elo_override: dict[str, float] | None = None,
 ) -> dict:
     """Run the Monte Carlo simulation and return per-team stage/title probabilities.
 
     ``params`` is the blended match model (architecture §4.3). When ``None`` it is
     fit once from the database (leak-free, point-in-time Elo); callers may inject an
     explicit ``MatchModelParams`` to avoid a fit (the unit tests do this).
+
+    Step 7 baseline knobs (both default to today's behaviour):
+    ``condition_on_results=False`` simulates the whole group stage from scratch, ignoring
+    completed 2026 results; ``elo_override`` supplies ratings (e.g. reconstructed
+    pre-tournament Elo) instead of ``teams.current_elo``. Together they produce the
+    pre-tournament baseline forecast.
 
     Returns ``{"n_sims", "seed", "teams": [{name, team_id, probs:{stage:p}}...]}``
     sorted by title probability descending.
@@ -242,8 +276,8 @@ def simulate(
         params = fit_match_model(conn)
     rng = np.random.default_rng(seed)
     groups = load_groups()
-    names, team_ids, elos, name_to_idx = _load_participants(conn, groups)
-    fixtures = _load_group_fixtures(conn, groups, name_to_idx)
+    names, team_ids, elos, name_to_idx = _load_participants(conn, groups, elo_override)
+    fixtures = _load_group_fixtures(conn, groups, name_to_idx, condition_on_results)
     n = n_sims
     rows = np.arange(n)
 
