@@ -14,8 +14,8 @@ The project is built in steps following the architecture's §8 build sequence.
 - ✅ **Step 2 — Elo engine (point-in-time)**
 - ✅ **Step 3 — Monte Carlo simulator (the spine)**
 - ✅ **Step 4 — Scoreline model & blend**
-- ✅ **Step 5 — Calibration harness** *(this step)*
-- ⬜ Step 6 — Update loop & snapshots
+- ✅ **Step 5 — Calibration harness**
+- ✅ **Step 6 — Update loop & snapshots** *(this step)*
 - ⬜ Step 7 — API & dashboard
 
 ## Layout
@@ -28,10 +28,11 @@ datasets/        raw data, one subfolder per source (never interlinked)
   transfermarkt/ deferred (optional, scrape) — placeholder
   fifa_2026/     groups + FIFA Annex C third-place table (bracket structure)
 src/forecast/    application package (config, db, loader, elo, ratings, tournament,
-                 dixon_coles, match_model, simulator, metrics, market, calibration)
+                 dixon_coles, match_model, simulator, metrics, market, calibration,
+                 update_loop)
 scripts/         CLIs: fetch_data, init_db, load_data, build_ratings,
                  fetch_fifa_structure, run_simulation, backtest_match_model,
-                 evaluate_calibration
+                 evaluate_calibration, update_loop
 reports/         generated calibration artifacts (git-ignored, regenerable)
 tests/           offline pytest suite
 docs/            architecture overview
@@ -163,6 +164,35 @@ The free tier serves only *upcoming* odds, so scored market calibration accrues 
 fixtures complete with odds captured beforehand; the committed
 `wc2026_h2h_odds.sample.json` lets the harness run offline in the meantime.
 
+## Update loop & snapshots (Step 6)
+
+The operational loop the app runs during the tournament (`update_loop.py`). As each
+WC2026 match finishes it: **ingests** the result (flips an existing fixture from `NULL`
+to a `"h:a"` score, in place), **rebuilds** point-in-time Elo, **refits** the blended
+match model, **re-simulates** the remaining bracket, and writes **one prediction
+snapshot** to the `predictions` table (architecture §3.3, §4, §5).
+
+```bash
+# Ingest a completed result, then refresh the forecast:
+python scripts/update_loop.py --date 2026-06-17 --home "Portugal" --away "DR Congo" --score 3:0
+
+# Re-sync the martj42 CSV (pick up newly filled scores), then refresh:
+python scripts/update_loop.py --reload
+
+# Just re-run on the current DB state:
+python scripts/update_loop.py [--sims N --seed S]
+```
+
+The output table adds a **Δtitle** column versus the previous snapshot, so the move is
+visible: a winner's title odds rise, a loser's drop toward zero.
+
+**Idempotent & seeded** (§7). The snapshot `run_id` is a deterministic fingerprint of
+the tournament state (completed WC2026 results + seed + sims + model version), so
+re-running on the same state overwrites the same snapshot (one history entry), while a
+newly completed result yields a new `run_id` and a new entry. Snapshots are queryable as
+a history via `list_runs`, `get_snapshot`, and `latest_snapshot` — the read surface
+Step 7's API and dashboard will consume.
+
 ## Tests
 
 ```bash
@@ -174,5 +204,7 @@ covers schema creation, loader idempotency, the hand-checked Elo engine
 (`test_elo.py`), leak-free replay (`test_ratings.py`), the FIFA R32 third-place
 table and bracket gate (`test_tournament.py`), the Dixon-Coles scoreline math and
 blended match model (`test_dixon_coles.py`, `test_match_model.py`), the simulator
-(`test_simulator.py`), and the calibration harness — scoring rules, odds de-vig, and
-the three-way comparison (`test_metrics.py`, `test_market.py`, `test_calibration.py`).
+(`test_simulator.py`), the calibration harness — scoring rules, odds de-vig, and
+the three-way comparison (`test_metrics.py`, `test_market.py`, `test_calibration.py`) —
+and the update loop: in-place ingest, deterministic `run_id`, snapshot history, and
+sensible movement on a new result (`test_update_loop.py`).

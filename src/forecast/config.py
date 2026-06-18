@@ -41,7 +41,7 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.5.0-step5-calibration"
+MODEL_VERSION = "0.6.0-step6-update-loop"
 
 # ---------------------------------------------------------------------------
 # Monte Carlo simulator (architecture §4.4, §7)
