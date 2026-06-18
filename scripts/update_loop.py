@@ -78,6 +78,15 @@ def main() -> int:
         {t["name"]: t["title_prob"] for t in before["teams"]} if before else {}
     )
 
+    # --- Sync the CSV first, then apply any explicit result on top ----------
+    # Order matters: the loader upserts the CSV's score for every fixture, so a --reload
+    # run *after* an explicit ingest would overwrite the just-entered score with the
+    # upstream CSV value (still NULL until the data provider fills it in). Reloading first
+    # and ingesting second means the explicit result always wins.
+    if args.reload:
+        summary = load(conn)
+        print(f"Reloaded martj42 CSV: {summary['matches_processed']:,} fixtures processed")
+
     # --- Ingest the new result ----------------------------------------------
     explicit = any((args.date, args.home, args.away, args.score))
     if explicit:
@@ -100,9 +109,6 @@ def main() -> int:
             )
             return 1
         print(f"Ingested: {args.date}  {args.home} {hs}-{as_} {args.away}")
-    if args.reload:
-        summary = load(conn)
-        print(f"Reloaded martj42 CSV: {summary['matches_processed']:,} fixtures processed")
 
     # --- Update --------------------------------------------------------------
     out = run_update(conn, n_sims=args.sims, seed=args.seed)

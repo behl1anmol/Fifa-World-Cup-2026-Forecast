@@ -158,13 +158,31 @@ def map_odds_to_matches(conn: sqlite3.Connection, odds_rows: list[dict]) -> list
     return matched
 
 
-def resolve_odds_path():
+def market_probs_by_match_id(matched_rows: list[dict]) -> dict:
+    """``{match_id: (pH, pD, pA)}`` for *upcoming* priced fixtures (``result is None``).
+
+    The live forecast blends these de-vigged market probabilities into the simulator as
+    an input-only feature (decision #6 — match the market, never "beat" it). Completed
+    fixtures are excluded: the simulator already conditions on their real scoreline, so
+    their odds are irrelevant and must never override a known result.
+    """
+    return {
+        r["match_id"]: (r["pH"], r["pD"], r["pA"])
+        for r in matched_rows
+        if r.get("result") is None and r.get("match_id") is not None
+    }
+
+
+def resolve_odds_path(allow_sample: bool = True):
     """Return ``(path, is_sample)``: the live odds file if present, else the sample.
 
-    ``(None, False)`` when neither exists, so the harness can skip the market leg.
+    ``(None, False)`` when neither exists, so the harness can skip the market leg. The
+    calibration harness uses the sample as an offline fallback (``allow_sample=True``);
+    the live forecast passes ``allow_sample=False`` so it is market-aware only on real
+    fetched odds, never the illustrative sample.
     """
     if ODDS_LIVE_FILE.exists():
         return ODDS_LIVE_FILE, False
-    if ODDS_SAMPLE_FILE.exists():
+    if allow_sample and ODDS_SAMPLE_FILE.exists():
         return ODDS_SAMPLE_FILE, True
     return None, False

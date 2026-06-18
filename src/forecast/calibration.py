@@ -17,17 +17,22 @@ historical tail and the (much later) 2026 matches.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import numpy as np
 
-from .config import CALIBRATION_CUTOFF, HOST_NATIONS, MARKET_BLEND_WEIGHT
+from .config import BLEND_WEIGHTS_3, CALIBRATION_CUTOFF, HOST_NATIONS, MARKET_BLEND_WEIGHT
+from .dixon_coles import outcome_probs
 from .match_model import (
     MatchModelParams,
     _load_fit_rows,
     blend,
+    blend_n,
+    elo_outcome,
     fit_match_model,
     predict,
+    team_lambdas,
 )
 from .metrics import brier, log_loss, outcome_index, rps
 from .ratings import _is_neutral, _parse_scoreline
@@ -69,6 +74,130 @@ def build_backtest(conn: sqlite3.Connection, *, cutoff: str = CALIBRATION_CUTOFF
     pred = _stack(predict(params, elo_h, elo_a, host_home))
     obs = outcome_index(gh, ga)
     return pred, obs, params
+
+
+def _heldout_views(conn, *, cutoff, params, gbm_view=None):
+    """Per-view ``(N, 3)`` predictions on the held-out tail (date ≥ cutoff), plus obs.
+
+    Computes each view once — Dixon-Coles, Elo, and (optionally) the LightGBM view — so
+    a weight grid-search can sweep cheaply over the cached arrays without re-fitting per
+    grid point. Returns ``(views, obs)`` where ``views`` is an ordered dict-like list of
+    ``(name, (N,3))`` pairs: ``[("dc", …), ("elo", …)]`` plus ``("gbm", …)`` when a view
+    is supplied. Leak-free: uses point-in-time ``elo_before`` exactly like build_backtest.
+    """
+    rows = [r for r in _load_fit_rows(conn, before=None) if r["date"] >= cutoff]
+    elo_h = np.array([r["elo_home"] for r in rows], float)
+    elo_a = np.array([r["elo_away"] for r in rows], float)
+    host_home = np.array([not _is_neutral(r["fs"]) for r in rows])
+    scores = [_parse_scoreline(r["result"]) for r in rows]
+    gh = np.array([s[0] for s in scores])
+    ga = np.array([s[1] for s in scores])
+    obs = outcome_index(gh, ga)
+
+    lam_h, lam_a = team_lambdas(params, elo_h, elo_a, host_home)
+    p_dc = _stack(outcome_probs(lam_h, lam_a, params.rho))
+    p_elo = _stack(elo_outcome(params, elo_h, elo_a, host_home))
+    views = [("dc", p_dc), ("elo", p_elo)]
+    if gbm_view is not None:
+        views.append(("gbm", _stack(gbm_view.predict(elo_h, elo_a, host_home))))
+    return views, obs
+
+
+def tune_blend_weight(conn, *, cutoff: str = CALIBRATION_CUTOFF,
+                      params: MatchModelParams | None = None, grid=None):
+    """Grid-search the two-view ``blend_weight`` (weight on Dixon-Coles) on held-out RPS.
+
+    Respects decision #8 — the result is a single *fixed* weight applied to every match,
+    chosen by minimising RPS on the time-split tail, **not** per-sample stacking. Returns
+    ``(best_weight, {weight: rps})``. Pure evaluation; does not mutate config.
+    """
+    if params is None:
+        params = fit_match_model(conn, before=cutoff)
+    if grid is None:
+        grid = [round(w, 2) for w in np.linspace(0.0, 1.0, 21)]
+    views, obs = _heldout_views(conn, cutoff=cutoff, params=params)
+    p_dc = dict(views)["dc"]
+    p_elo = dict(views)["elo"]
+    table = {}
+    for w in grid:
+        pred = _stack(blend((p_dc[:, 0], p_dc[:, 1], p_dc[:, 2]),
+                            (p_elo[:, 0], p_elo[:, 1], p_elo[:, 2]), w))
+        table[w] = rps(pred, obs)
+    best = min(table, key=table.get)
+    return best, table
+
+
+def tune_blend_weights_n(conn, *, cutoff: str = CALIBRATION_CUTOFF,
+                         params: MatchModelParams | None = None, gbm_view=None,
+                         grid_step: float = 0.1):
+    """Grid-search the fixed N-view weight simplex (DC, Elo[, GBM]) on held-out RPS.
+
+    Enumerates every weight combination on a ``grid_step`` lattice that sums to 1 and
+    returns ``(best_weights, table)`` where ``table`` maps the weight tuple to its RPS.
+    With ``gbm_view=None`` this reduces to the two-view search. Fixed weights only.
+    """
+    if params is None:
+        params = fit_match_model(conn, before=cutoff)
+    views, obs = _heldout_views(conn, cutoff=cutoff, params=params, gbm_view=gbm_view)
+    mats = [m for _, m in views]
+    k = len(mats)
+    steps = int(round(1.0 / grid_step))
+    table = {}
+    # Enumerate non-negative integer compositions of ``steps`` into ``k`` parts.
+    def compositions(total, parts):
+        if parts == 1:
+            yield (total,)
+            return
+        for first in range(total + 1):
+            for rest in compositions(total - first, parts - 1):
+                yield (first,) + rest
+
+    for comp in compositions(steps, k):
+        weights = tuple(c / steps for c in comp)
+        triples = [(m[:, 0], m[:, 1], m[:, 2]) for m in mats]
+        pred = _stack(blend_n(triples, weights))
+        table[weights] = rps(pred, obs)
+    best = min(table, key=table.get)
+    return best, table
+
+
+def backtest_blend(conn, *, cutoff: str = CALIBRATION_CUTOFF,
+                   params: MatchModelParams | None = None, gbm_view=None, weights=None):
+    """Held-out backtest predictions for an arbitrary fixed-weight blend of the views.
+
+    Like :func:`build_backtest` but lets a caller score the re-fit two-view blend or the
+    three-view (DC + Elo + LightGBM) blend. With ``gbm_view=None`` and the params'
+    ``blend_weight`` this reproduces :func:`build_backtest`. Returns ``(pred (N,3), obs)``.
+    """
+    if params is None:
+        params = fit_match_model(conn, before=cutoff)
+    views, obs = _heldout_views(conn, cutoff=cutoff, params=params, gbm_view=gbm_view)
+    triples = [(m[:, 0], m[:, 1], m[:, 2]) for _, m in views]
+    if weights is None:
+        weights = (BLEND_WEIGHTS_3 if gbm_view is not None
+                   else (params.blend_weight, 1.0 - params.blend_weight))
+    return _stack(blend_n(triples, weights)), obs
+
+
+def load_baseline(path) -> dict:
+    """Load a committed calibration baseline JSON (``{cutoff, rps, brier, log_loss, n}``)."""
+    return json.loads(open(path, encoding="utf-8").read())
+
+
+def check_no_regression(metrics: dict, baseline: dict, eps: float = 1e-3) -> dict:
+    """Compare current metrics to a baseline; lower-is-better with tolerance ``eps``.
+
+    Returns ``{metric: {"current", "baseline", "ok"}, "passed": bool}`` for RPS, Brier and
+    log-loss. ``ok`` is True when ``current <= baseline + eps`` (no regression).
+    """
+    out = {"passed": True}
+    for key in ("rps", "brier", "log_loss"):
+        cur = float(metrics[key])
+        base = float(baseline[key])
+        ok = cur <= base + eps
+        out[key] = {"current": cur, "baseline": base, "ok": ok}
+        out["passed"] = out["passed"] and ok
+    return out
 
 
 def market_blend(pred_fund, pred_market, weight: float = MARKET_BLEND_WEIGHT):

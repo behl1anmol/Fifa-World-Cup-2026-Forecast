@@ -11,6 +11,7 @@ from forecast.market import (
     devig,
     load_odds_json,
     map_odds_to_matches,
+    market_probs_by_match_id,
 )
 
 
@@ -77,3 +78,15 @@ def test_map_odds_skips_unknown_fixture(conn):
              "commence_time": "2026-06-11T18:00:00Z", "pH": 0.5, "pD": 0.3,
              "pA": 0.2, "n_books": 1}]
     assert map_odds_to_matches(conn, odds) == []
+
+
+def test_market_probs_by_match_id_filters_completed():
+    # Only upcoming (result is None) priced fixtures become live-forecast overrides;
+    # a completed fixture is already conditioned on its real score and must be excluded.
+    matched = [
+        {"match_id": 11, "pH": 0.6, "pD": 0.25, "pA": 0.15, "result": None},
+        {"match_id": 22, "pH": 0.4, "pD": 0.30, "pA": 0.30, "result": "2:1"},
+        {"match_id": None, "pH": 0.5, "pD": 0.30, "pA": 0.20, "result": None},
+    ]
+    out = market_probs_by_match_id(matched)
+    assert out == {11: (0.6, 0.25, 0.15)}

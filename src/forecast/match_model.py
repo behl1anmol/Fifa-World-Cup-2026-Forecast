@@ -31,6 +31,7 @@ import numpy as np
 from .config import (
     BASE_GOALS,
     BLEND_WEIGHT,
+    BLEND_WEIGHTS_3,
     DC_FIT_HALF_LIFE_DAYS,
     DC_MAX_GOALS,
     DC_RHO,
@@ -118,9 +119,38 @@ def elo_outcome(params: MatchModelParams, elo_h, elo_a, host_home=False):
     return p_home / total, p_draw / total, p_away / total
 
 
+def blend_n(views, weights):
+    """Fixed-weight convex combination of N ``(pH, pD, pA)`` triples (decision #8).
+
+    ``views`` is a sequence of N triples (scalars or NumPy arrays); ``weights`` is a
+    sequence of N floats. Weights are normalised defensively so the result is a valid
+    probability triple even if they do not sum exactly to 1. This is the project's
+    single N-view averaging primitive; :func:`blend` is the 2-view special case kept
+    for the existing call sites.
+    """
+    views = list(views)
+    w = np.asarray(weights, float)
+    if len(views) != w.shape[0]:
+        raise ValueError("views and weights must have the same length")
+    total = w.sum()
+    if total <= 0:
+        raise ValueError("weights must sum to a positive value")
+    w = w / total
+    out = [0.0, 0.0, 0.0]
+    for (ph, pd, pa), wi in zip(views, w):
+        out[0] = out[0] + wi * ph
+        out[1] = out[1] + wi * pd
+        out[2] = out[2] + wi * pa
+    return tuple(out)
+
+
 def blend(p_dc, p_elo, weight: float):
-    """Fixed-weight average of two ``(pH, pD, pA)`` triples (decision #8)."""
-    return tuple(weight * dc + (1.0 - weight) * elo for dc, elo in zip(p_dc, p_elo))
+    """Fixed-weight average of two ``(pH, pD, pA)`` triples (decision #8).
+
+    Back-compatible 2-view shim over :func:`blend_n`: ``weight`` is the weight on the
+    first (Dixon-Coles) view, ``1 - weight`` on the second (Elo) view.
+    """
+    return blend_n((p_dc, p_elo), (weight, 1.0 - weight))
 
 
 def predict(params: MatchModelParams, elo_h, elo_a, host_home=False):
@@ -129,6 +159,27 @@ def predict(params: MatchModelParams, elo_h, elo_a, host_home=False):
     p_dc = outcome_probs(lam_h, lam_a, params.rho)
     p_elo = elo_outcome(params, elo_h, elo_a, host_home)
     return blend(p_dc, p_elo, params.blend_weight)
+
+
+def predict3(params: MatchModelParams, elo_h, elo_a, host_home=False,
+             gbm_view=None, weights=None):
+    """Three-view blended ``(p_home, p_draw, p_away)`` — DC + Elo + optional LightGBM.
+
+    With ``gbm_view=None`` this returns *exactly* :func:`predict` (the two-view blend),
+    so the LightGBM view is a strictly optional add-on and the core never depends on it.
+    When a fitted ``gbm_view`` is supplied, its W/D/L prediction joins the Dixon-Coles
+    and Elo views under the fixed weight vector ``weights`` (default ``BLEND_WEIGHTS_3``),
+    still a fixed-weight blend, not per-sample stacking (decision #8). Vectorised.
+    """
+    lam_h, lam_a = team_lambdas(params, elo_h, elo_a, host_home)
+    p_dc = outcome_probs(lam_h, lam_a, params.rho)
+    p_elo = elo_outcome(params, elo_h, elo_a, host_home)
+    if gbm_view is None:
+        return blend(p_dc, p_elo, params.blend_weight)
+    p_gbm = gbm_view.predict(elo_h, elo_a, host_home)
+    if weights is None:
+        weights = BLEND_WEIGHTS_3
+    return blend_n((p_dc, p_elo, p_gbm), weights)
 
 
 def scoreline_distribution(

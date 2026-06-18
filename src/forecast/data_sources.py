@@ -93,7 +93,7 @@ def fetch_odds_api() -> bool:
     Reads ``ODDS_API_KEY`` from the environment. If absent, prints a skip notice
     and returns ``False`` without failing — the core app never depends on odds.
     """
-    key = os.environ.get("ODDS_API_KEY")
+    key = os.environ.get("ODDS_API_KEY", "").strip()  # tolerate stray surrounding whitespace
     ODDS_API_DIR.mkdir(parents=True, exist_ok=True)
     if not key:
         print(

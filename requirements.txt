@@ -18,6 +18,12 @@ streamlit>=1.30
 # HTTP for data fetching
 requests>=2.31
 
+# Optional Step 8 LightGBM view (architecture §4.3, "Could-have"). The core forecast
+# never imports lightgbm — gbm_view degrades gracefully when these are absent — so these
+# are optional extras. scikit-learn backs lightgbm's sklearn estimator API.
+lightgbm>=4.0
+scikit-learn>=1.3
+
 # Tests
 pytest>=8.0
 httpx>=0.24            # FastAPI TestClient (Step 7 endpoint tests)
