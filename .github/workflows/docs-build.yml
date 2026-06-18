@@ -1,0 +1,49 @@
+name: Docs Build
+
+# Automated build/validation of the documentation site.
+# This is the ONLY workflow that runs automatically: on pull requests to main and on
+# pushes/merges to main. Deployment (docs-deploy.yml) is manual only.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs-build.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+
+      - name: Install docs toolchain
+        run: pip install -r requirements-docs.txt
+
+      - name: Build site (strict — fails on broken links or bad Mermaid)
+        run: mkdocs build --strict
+
+      - name: Upload built site (CI artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: site/
+          if-no-files-found: error

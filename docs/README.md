@@ -42,7 +42,8 @@ helps, each page links back to the relevant spec section (e.g. "§4.4").
 5. **[Code Reference](code-reference.md)** — a map of every module and script.
 6. **[Operations](operations.md)** — running it live, the API/dashboard, and every config knob.
 7. **[Testing](testing.md)** — how the automated tests work and what they protect.
-8. **[Glossary & FAQ](glossary.md)** — quick definitions and common questions.
+8. **[Deployment](deployment.md)** — publishing these docs to GitHub Pages and deploying the dashboard.
+9. **[Glossary & FAQ](glossary.md)** — quick definitions and common questions.
 
 ## The 30-second mental model
 

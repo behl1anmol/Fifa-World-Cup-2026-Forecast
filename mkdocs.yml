@@ -1,0 +1,69 @@
+site_name: FIFA World Cup 2026 Forecast — Docs
+site_description: >-
+  A live, all-Python title-odds tracker for the 2026 World Cup. This site is the
+  beginner-friendly guide to how the app works, how to run it, and how to operate it.
+site_url: https://behl1anmol.github.io/Fifa-World-Cup-2026-Forecast/
+repo_url: https://github.com/behl1anmol/Fifa-World-Cup-2026-Forecast
+repo_name: behl1anmol/Fifa-World-Cup-2026-Forecast
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+# Build-time link fixer (rewrites ../src, ../scripts, etc. to absolute GitHub URLs).
+# Kept outside docs_dir so it is not copied into the published site.
+hooks:
+  - hooks/fix_repo_links.py
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: README.md
+  - Getting Started: getting-started.md
+  - Concepts Explained: concepts.md
+  - How It Works: how-it-works.md
+  - Data & Datasets: data.md
+  - Code Reference: code-reference.md
+  - Operations: operations.md
+  - Testing: testing.md
+  - Deployment: deployment.md
+  - Architecture Spec: architecture-overview.md
+  - Glossary & FAQ: glossary.md
