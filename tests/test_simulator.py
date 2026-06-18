@@ -122,6 +122,31 @@ def test_blend_weight_changes_the_forecast(conn):
     assert pa != pb
 
 
+def test_condition_on_results_false_ignores_completed_games(conn):
+    # Group A team0 loses all three games. With conditioning it is eliminated (R32=0);
+    # ignoring results (the pre-tournament baseline path) it can advance again (R32>0).
+    groups = load_groups()
+    a = groups["A"]
+    results = {
+        (a[0], a[1]): "0:3", (a[0], a[2]): "0:3", (a[0], a[3]): "0:3",
+        (a[1], a[2]): "2:0", (a[1], a[3]): "2:0", (a[2], a[3]): "2:0",
+    }
+    _build_wc_db(conn, results=results)
+    cond = {t["name"]: t["probs"] for t in simulate(conn, n_sims=1000, seed=3)["teams"]}
+    assert cond[a[0]]["r32"] == 0.0
+    free = {t["name"]: t["probs"] for t in
+            simulate(conn, n_sims=1000, seed=3, condition_on_results=False)["teams"]}
+    assert free[a[0]]["r32"] > 0.0
+
+
+def test_elo_override_changes_the_favourite(conn):
+    _build_wc_db(conn)
+    underdog = load_groups()["L"][3]  # lowest synthetic Elo by insertion order
+    res = simulate(conn, n_sims=1500, seed=5, params=MatchModelParams.default(),
+                   elo_override={underdog: 4000.0})
+    assert res["teams"][0]["name"] == underdog  # huge override rating => clear favourite
+
+
 def test_write_predictions_persists_one_row_per_team(conn):
     _build_wc_db(conn)
     result = simulate(conn, n_sims=500, seed=1)

@@ -41,7 +41,7 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.6.0-step6-update-loop"
+MODEL_VERSION = "0.7.0-step7-serving"
 
 # ---------------------------------------------------------------------------
 # Monte Carlo simulator (architecture §4.4, §7)
@@ -139,3 +139,19 @@ DATA_SOURCES: dict[str, dict] = {
 # Hosts of WC2026 — the only teams with genuine home advantage (architecture
 # §4.3). Used from Step 4; defined here so the value has one home.
 HOST_NATIONS = ("United States", "Canada", "Mexico")
+
+# ---------------------------------------------------------------------------
+# Serving layer (architecture §4.6) — Step 7
+# ---------------------------------------------------------------------------
+API_HOST = "127.0.0.1"   # FastAPI bind host (loopback by default)
+API_PORT = 8000          # FastAPI port
+DASHBOARD_PORT = 8501    # Streamlit dashboard port
+
+# The reserved run_id of the reconstructed pre-tournament baseline snapshot — the
+# "pre-tourney vs now" comparison point (§7). Distinct from the deterministic
+# state-fingerprint run_ids the live update loop writes.
+BASELINE_RUN_ID = "pretournament"
+
+# WC2026 kickoff: the boundary for reconstructing pre-tournament point-in-time Elo
+# (ratings as of the last match strictly before this date).
+WC_START_DATE = "2026-06-11"

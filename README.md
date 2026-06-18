@@ -15,8 +15,8 @@ The project is built in steps following the architecture's §8 build sequence.
 - ✅ **Step 3 — Monte Carlo simulator (the spine)**
 - ✅ **Step 4 — Scoreline model & blend**
 - ✅ **Step 5 — Calibration harness**
-- ✅ **Step 6 — Update loop & snapshots** *(this step)*
-- ⬜ Step 7 — API & dashboard
+- ✅ **Step 6 — Update loop & snapshots**
+- ✅ **Step 7 — API & dashboard** *(this step)*
 
 ## Layout
 
@@ -29,10 +29,10 @@ datasets/        raw data, one subfolder per source (never interlinked)
   fifa_2026/     groups + FIFA Annex C third-place table (bracket structure)
 src/forecast/    application package (config, db, loader, elo, ratings, tournament,
                  dixon_coles, match_model, simulator, metrics, market, calibration,
-                 update_loop)
+                 update_loop, service, api, dashboard)
 scripts/         CLIs: fetch_data, init_db, load_data, build_ratings,
                  fetch_fifa_structure, run_simulation, backtest_match_model,
-                 evaluate_calibration, update_loop
+                 evaluate_calibration, update_loop, build_baseline, serve_api, dashboard
 reports/         generated calibration artifacts (git-ignored, regenerable)
 tests/           offline pytest suite
 docs/            architecture overview
@@ -190,8 +190,42 @@ visible: a winner's title odds rise, a loser's drop toward zero.
 the tournament state (completed WC2026 results + seed + sims + model version), so
 re-running on the same state overwrites the same snapshot (one history entry), while a
 newly completed result yields a new `run_id` and a new entry. Snapshots are queryable as
-a history via `list_runs`, `get_snapshot`, and `latest_snapshot` — the read surface
-Step 7's API and dashboard will consume.
+a history via `list_runs`, `get_snapshot`, and `latest_snapshot` — the read surface the
+Step 7 API and dashboard consume.
+
+## Serving layer & dashboard (Step 7)
+
+A shared, read-only **service layer** (`service.py`) turns the persisted forecast into
+JSON-ready dicts; both the API and the dashboard import it directly, so they never drift
+and the dashboard needs no running server.
+
+**FastAPI** (`api.py`, run via `scripts/serve_api.py`) exposes read endpoints:
+`/api/snapshot/latest`, `/api/snapshot/{run_id}`, `/api/runs`, `/api/team/{id}`
+(a team's stage path), `/api/compare` (pre-tournament vs now), `/api/market`, and
+`/api/export/{run_id}` (shareable JSON download). Each request opens its own SQLite
+connection; interactive docs at `/docs`.
+
+**Streamlit dashboard** (`dashboard.py`, run via `scripts/dashboard.py`): ranked live
+title odds, a per-team path to the final, a **pre-tournament vs now** toggle, a
+last-updated timestamp + model version, a **model-vs-market** comparison, and a
+shareable snapshot export. Clean and interactive, no animation (§4.6).
+
+The **pre-tournament baseline** is a reconstructed forecast — group results ignored and
+pre-WC point-in-time Elo (`ratings.pretournament_elos`) — written once under the reserved
+`run_id = "pretournament"` (`scripts/build_baseline.py`); it is the fixed "pre" side of
+the toggle and is excluded from the live snapshot history.
+
+```bash
+pip install -r requirements.txt                  # fastapi, uvicorn, streamlit, httpx
+python scripts/build_ratings.py                  # load + point-in-time Elo
+python scripts/run_simulation.py                 # first live snapshot
+python scripts/build_baseline.py                 # pre-tournament baseline
+python scripts/serve_api.py                      # API on http://127.0.0.1:8000
+python scripts/dashboard.py                       # dashboard on http://127.0.0.1:8501
+```
+
+After an update (`python scripts/update_loop.py --date … --home … --away … --score …`),
+the API and dashboard reflect the new numbers and last-updated timestamp.
 
 ## Tests
 
@@ -206,5 +240,7 @@ table and bracket gate (`test_tournament.py`), the Dixon-Coles scoreline math an
 blended match model (`test_dixon_coles.py`, `test_match_model.py`), the simulator
 (`test_simulator.py`), the calibration harness — scoring rules, odds de-vig, and
 the three-way comparison (`test_metrics.py`, `test_market.py`, `test_calibration.py`) —
-and the update loop: in-place ingest, deterministic `run_id`, snapshot history, and
-sensible movement on a new result (`test_update_loop.py`).
+the update loop: in-place ingest, deterministic `run_id`, snapshot history, and
+sensible movement on a new result (`test_update_loop.py`), and the serving layer:
+the shared service functions (`test_service.py`) and the FastAPI endpoints via
+`TestClient` (`test_api.py`).

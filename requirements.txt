@@ -10,7 +10,7 @@ statsmodels>=0.14
 # Plotting (Step 5 reliability diagram; static PNG via the Agg backend)
 matplotlib>=3.5
 
-# Serving layer (used from Step 7; declared up front for a single env)
+# Serving layer (Step 7: FastAPI API + Streamlit dashboard)
 fastapi>=0.110
 uvicorn>=0.27
 streamlit>=1.30
@@ -20,3 +20,4 @@ requests>=2.31
 
 # Tests
 pytest>=8.0
+httpx>=0.24            # FastAPI TestClient (Step 7 endpoint tests)
