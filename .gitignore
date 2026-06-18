@@ -11,6 +11,10 @@ reports/
 # *.sample.json illustrative file is kept under version control)
 datasets/odds_api/wc2026_h2h_odds.json
 
+# Forecast app: cached Transfermarkt squad-strength extract (optional Step 8 feature;
+# never scraped here. The committed *.sample.json illustrative file is kept in VCS)
+datasets/transfermarkt/squad_strength.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

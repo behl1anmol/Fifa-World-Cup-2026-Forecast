@@ -25,24 +25,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forecast.calibration import (  # noqa: E402
+    backtest_blend,
     build_backtest,
     build_report,
+    check_no_regression,
     evaluate,
     live_comparison,
+    load_baseline,
     three_way,
 )
 from forecast.config import (  # noqa: E402
+    BLEND_WEIGHTS_3,
     CALIBRATION_CUTOFF,
     MARKET_BLEND_WEIGHT,
     MARTJ42_RESULTS_CSV,
+    PROJECT_ROOT,
     RELIABILITY_BINS,
     REPORTS_DIR,
 )
 from forecast.db import connect, create_schema, row_count  # noqa: E402
+from forecast.gbm_view import fit_gbm_view, lightgbm_available  # noqa: E402
 from forecast.loader import load  # noqa: E402
 from forecast.market import load_odds_json, map_odds_to_matches, resolve_odds_path  # noqa: E402
 from forecast.metrics import reliability_curve, save_reliability_diagram  # noqa: E402
 from forecast.ratings import replay_history  # noqa: E402
+
+BASELINE_PATH = PROJECT_ROOT / "tests" / "baselines" / "step5_calibration.json"
 
 
 def main() -> int:
@@ -74,6 +82,35 @@ def main() -> int:
     print(f"  RPS     : {hist['rps']:.4f}   (primary)")
     print(f"  Brier   : {hist['brier']:.4f}")
     print(f"  log-loss: {hist['log_loss']:.4f}")
+
+    # --- 1b. Optional three-view (DC + Elo + LightGBM) backtest ---------------
+    gbm = fit_gbm_view(conn, before=args.cutoff) if lightgbm_available() else None
+    final = hist
+    if gbm is not None:
+        pred3, obs3 = backtest_blend(conn, cutoff=args.cutoff, params=params, gbm_view=gbm,
+                                     weights=BLEND_WEIGHTS_3)
+        final = evaluate(pred3, obs3)
+        curves["three-view (DC+Elo+GBM)"] = reliability_curve(pred3, obs3, args.bins)
+        print("-" * 64)
+        print(f"  three-view (+LightGBM) weights {BLEND_WEIGHTS_3}")
+        print(f"  RPS={final['rps']:.4f}  Brier={final['brier']:.4f}  log-loss={final['log_loss']:.4f}")
+    else:
+        print("  (LightGBM view unavailable — reporting the two-view blend only)")
+
+    # --- 1c. No-regression gate vs the committed Step 5 baseline --------------
+    if BASELINE_PATH.exists():
+        baseline = load_baseline(BASELINE_PATH)
+        check = check_no_regression(final, baseline)
+        print("-" * 64)
+        verdict = "PASS — no regression" if check["passed"] else "FAIL — regression!"
+        print(f"  Step 5 baseline (cutoff {baseline['cutoff']}): "
+              f"RPS {baseline['rps']:.4f} / Brier {baseline['brier']:.4f} / "
+              f"log-loss {baseline['log_loss']:.4f}")
+        for k in ("rps", "brier", "log_loss"):
+            c = check[k]
+            print(f"    {k:<9} {c['current']:.4f} vs {c['baseline']:.4f}  "
+                  f"{'ok' if c['ok'] else 'REGRESSION'}")
+        print(f"  ==> {verdict}")
 
     # --- 2. Market reference --------------------------------------------------
     odds_path, is_sample = resolve_odds_path()
@@ -114,12 +151,12 @@ def main() -> int:
     # --- 3. Save artifacts ----------------------------------------------------
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     plot_path = save_reliability_diagram(
-        curves, REPORTS_DIR / "reliability_step5.png",
+        curves, REPORTS_DIR / "reliability_step8.png",
         title=f"Calibration — reliability diagram (cutoff {args.cutoff})",
     )
     report = build_report(hist, tw, cutoff=args.cutoff, is_sample=is_sample,
                           weight=args.market_weight)
-    report_path = REPORTS_DIR / "step5_calibration_report.md"
+    report_path = REPORTS_DIR / "step8_calibration_report.md"
     report_path.write_text(report, encoding="utf-8")
 
     print("=" * 64)

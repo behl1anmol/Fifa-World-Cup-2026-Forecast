@@ -30,6 +30,14 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 ODDS_LIVE_FILE = ODDS_API_DIR / "wc2026_h2h_odds.json"
 ODDS_SAMPLE_FILE = ODDS_API_DIR / "wc2026_h2h_odds.sample.json"
 
+# Squad-strength snapshots (Step 8, architecture §6, decision/Compliance). Transfermarkt
+# scraping carries ToS exposure, so squad strength is optional and *cached*: the core
+# never depends on it. ``SQUAD_LIVE_FILE`` is a (git-ignored) cached extract; the
+# committed ``*.sample.json`` is a clearly-labelled illustrative cache so the feature is
+# demonstrable and tests run offline. Mirrors the odds live/sample split.
+SQUAD_LIVE_FILE = TRANSFERMARKT_DIR / "squad_strength.json"
+SQUAD_SAMPLE_FILE = TRANSFERMARKT_DIR / "squad_strength.sample.json"
+
 # Default on-disk SQLite database (git-ignored; rebuildable from datasets/).
 DB_PATH = Path(os.environ.get("FORECAST_DB", PROJECT_ROOT / "forecast.db"))
 
@@ -41,7 +49,7 @@ MARTJ42_RESULTS_CSV = MARTJ42_DIR / "results.csv"
 # ---------------------------------------------------------------------------
 # Stamped onto prediction snapshots (architecture §5, §7). Bumped as the model
 # evolves across build steps.
-MODEL_VERSION = "0.7.0-step7-serving"
+MODEL_VERSION = "0.8.0-step8-features"
 
 # ---------------------------------------------------------------------------
 # Monte Carlo simulator (architecture §4.4, §7)
@@ -74,8 +82,22 @@ DRAW_BASE = 0.27                 # draw probability for an even matchup (seed)
 DRAW_DECAY = 350.0               # Elo-points scale over which draws decay (seed)
 
 # Fixed-weight blend of the Dixon-Coles outcome with the Elo-implied outcome
-# (decision #8: fixed weight, not learned stacking). Configurable; Step 5 may tune.
-BLEND_WEIGHT = 0.5               # weight on the Dixon-Coles outcome in [0, 1]
+# (decision #8: fixed weight, not learned stacking). Configurable; Step 5/8 may tune.
+# The Step 8 tuner (scripts/tune_blend_weight.py) grid-searches this on held-out RPS;
+# the chosen value is committed here as a constant — tuning stays offline so the live
+# path never re-fits the weight (preserves reproducibility, §7, and avoids leakage).
+# Re-fit in Step 8 by grid-search on held-out RPS (cutoff 2018-01-01): 0.60 improves on
+# the original 0.50 seed (RPS 0.16992 vs 0.16997) without regressing — see
+# scripts/tune_blend_weight.py.
+BLEND_WEIGHT = 0.6               # weight on the Dixon-Coles outcome in [0, 1]
+
+# Step 8: optional three-view blend (Dixon-Coles, Elo, LightGBM) weight vector, used by
+# match_model.predict3 only when a fitted LightGBM view is supplied. Must be non-negative;
+# it is normalised to sum to 1 at use. When LightGBM is unavailable the two-view
+# BLEND_WEIGHT above is used and these are ignored (the core never depends on lightgbm).
+# Re-fit by scripts/tune_blend_weight.py (held-out RPS grid optimum) and committed here.
+# Order: (DC, Elo, LightGBM). 3-view RPS 0.16978 < 2-view 0.16992 < Step 5 baseline 0.16997.
+BLEND_WEIGHTS_3 = (0.6, 0.2, 0.2)
 
 # Time-decay half-life (days) for weighting historical matches in the fit, so
 # recent international form counts more (Dixon-Coles down-weighting idea).
@@ -89,9 +111,22 @@ DC_FIT_HALF_LIFE_DAYS = 365.0 * 8.0  # ~8 years
 CALIBRATION_CUTOFF = "2018-01-01"
 RELIABILITY_BINS = 10            # bins for the reliability (calibration) diagram
 
-# Fixed-weight blend of the de-vigged market price with the fundamentals model, to
-# form the market-aware "model" row (decision #6, #8). Weight is on the market.
+# Fixed-weight blend of the de-vigged market price with the fundamentals model. Used
+# both for the calibration "model" row (decision #6, #8) and — from Step 8 — as the
+# input-only market feature blended into the live simulator for priced fixtures. Weight
+# is on the market.
 MARKET_BLEND_WEIGHT = 0.5        # weight on the market in [0, 1]
+
+# ---------------------------------------------------------------------------
+# Squad-strength feature (architecture §6, §4.3, "Could-have") — Step 8
+# ---------------------------------------------------------------------------
+# Optional, off by default: the core forecast never depends on scraped data. When
+# enabled (and a cached squad file is present), each WC2026 team's live Elo is nudged by
+# its z-scored squad strength × SQUAD_STRENGTH_ELO_SCALE before the live simulation. The
+# nudge is deliberately small and applied to 2026 teams only — it never enters the
+# leak-free historical backtest, so the Step 5 calibration baseline is unaffected.
+SQUAD_STRENGTH_ENABLED = False   # opt-in; the live forecast ignores squad data unless True
+SQUAD_STRENGTH_ELO_SCALE = 25.0  # Elo points applied at +1σ of squad strength
 
 # ---------------------------------------------------------------------------
 # Elo model parameters (architecture §4.2)

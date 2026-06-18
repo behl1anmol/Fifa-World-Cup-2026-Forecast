@@ -1,0 +1,8 @@
+{
+  "_comment": "Step 5 calibration baseline — the odds-free fundamentals backtest on the committed martj42 dataset at the Step 5 cutoff. Captured from the unchanged Step 7 code BEFORE any Step 8 change. Step 8 acceptance: metrics must not regress (RPS/Brier/log-loss <= these + epsilon). Regenerate via scripts/evaluate_calibration.py.",
+  "cutoff": "2018-01-01",
+  "rps": 0.169974,
+  "brier": 0.512153,
+  "log_loss": 0.871355,
+  "n": 8127
+}

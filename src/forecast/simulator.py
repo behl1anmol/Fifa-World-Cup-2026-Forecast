@@ -26,7 +26,14 @@ from datetime import datetime, timezone
 
 import numpy as np
 
-from .config import ELO_DEFAULT_RATING, HOST_NATIONS, MODEL_VERSION, N_SIMS, SIM_SEED
+from .config import (
+    ELO_DEFAULT_RATING,
+    HOST_NATIONS,
+    MARKET_BLEND_WEIGHT,
+    MODEL_VERSION,
+    N_SIMS,
+    SIM_SEED,
+)
 from .dixon_coles import outcome_probs
 from .match_model import (
     MatchModelParams,
@@ -53,6 +60,16 @@ from .tournament import (
 
 # Stage keys, ordered; each is the probability of *reaching* that stage (title = win).
 STAGES = ("r32", "r16", "qf", "sf", "final", "title")
+
+
+def _market_blend_triple(p_fund, market_triple, weight=MARKET_BLEND_WEIGHT):
+    """Blend a fixture's de-vigged market ``(pH, pD, pA)`` into the fundamentals triple.
+
+    Mirrors :func:`calibration.market_blend`: the same fixed-weight averaging primitive
+    (``match_model.blend``) with the weight on the *market*. Input-only — the market is
+    the strongest free signal for a priced fixture, never a "beat" target (decision #6).
+    """
+    return blend(market_triple, p_fund, weight)
 
 
 def _sample_scoreline(matrix, p_blend, n, rng):
@@ -175,12 +192,14 @@ def _load_participants(
 
 
 def _load_group_fixtures(conn, groups, name_to_idx, condition_on_results=True):
-    """Return ``{letter: [(local_a, local_b, result_or_None, host_home), ...]}``.
+    """Return ``{letter: [(local_a, local_b, result_or_None, host_home, match_id), ...]}``.
 
     ``local_*`` index into the group's four teams (groups.json order); result is the
     played ``"h:a"`` scoreline or ``None`` for an unplayed fixture to be simulated;
     ``host_home`` is True when the home team is a host nation playing a non-neutral
-    game — the only place genuine home advantage applies (§4.3). Six per group.
+    game — the only place genuine home advantage applies (§4.3); ``match_id`` is the DB
+    row id, the key the optional market-odds feature uses to find a fixture's de-vigged
+    price. Six per group.
 
     ``condition_on_results=False`` (Step 7) forces every fixture to ``None`` so the
     whole group stage is simulated from scratch — used for the pre-tournament baseline.
@@ -191,7 +210,7 @@ def _load_group_fixtures(conn, groups, name_to_idx, condition_on_results=True):
     fixtures: dict[str, list] = {letter: [] for letter in GROUP_LETTERS}
     rows = conn.execute(
         """
-        SELECT h.name AS home, a.name AS away, m.result AS result,
+        SELECT m.id AS match_id, h.name AS home, a.name AS away, m.result AS result,
                m.feature_snapshot AS fs
         FROM matches m
         JOIN teams h ON h.id = m.home
@@ -206,7 +225,7 @@ def _load_group_fixtures(conn, groups, name_to_idx, condition_on_results=True):
         host_home = r["home"] in hosts and not _is_neutral(r["fs"])
         result = r["result"] if condition_on_results else None
         fixtures[letter].append(
-            (local[r["home"]], local[r["away"]], result, host_home)
+            (local[r["home"]], local[r["away"]], result, host_home, r["match_id"])
         )
     for letter in GROUP_LETTERS:
         fixtures[letter].sort(key=lambda f: (f[0], f[1]))  # stable RNG-draw order
@@ -215,13 +234,20 @@ def _load_group_fixtures(conn, groups, name_to_idx, condition_on_results=True):
     return fixtures
 
 
-def _simulate_group(params, group_elo, fixtures, n, rng):
+def _simulate_group(params, group_elo, fixtures, n, rng, market_probs=None):
     """Simulate one group; return per-sim (winner, runner, third) local indices and
-    the third-placed team's cross-group ranking score."""
+    the third-placed team's cross-group ranking score.
+
+    ``market_probs`` (optional) maps a fixture's DB ``match_id`` to its de-vigged
+    ``(pH, pD, pA)``. For an unplayed priced fixture the market is blended into the
+    fundamentals outcome (input-only, decision #6); the Dixon-Coles scoreline *texture*
+    is left untouched, so only the W/D/L mass shifts while goal counts keep the shape
+    the group tiebreakers need.
+    """
     points = np.zeros((4, n))
     gd = np.zeros((4, n))
     gf = np.zeros((4, n))
-    for a, b, result, host_home in fixtures:
+    for a, b, result, host_home, match_id in fixtures:
         if result is not None:
             hs, as_ = (int(x) for x in result.split(":"))
             ga = np.full(n, hs)
@@ -229,6 +255,8 @@ def _simulate_group(params, group_elo, fixtures, n, rng):
         else:
             matrix = scoreline_distribution(params, group_elo[a], group_elo[b], host_home)
             p_blend = predict(params, group_elo[a], group_elo[b], host_home)
+            if market_probs is not None and match_id in market_probs:
+                p_blend = _market_blend_triple(p_blend, market_probs[match_id])
             ga, gb = _sample_scoreline(matrix, p_blend, n, rng)
         points[a] += 3 * (ga > gb) + (ga == gb)
         points[b] += 3 * (gb > ga) + (ga == gb)
@@ -256,6 +284,7 @@ def simulate(
     params: MatchModelParams | None = None,
     condition_on_results: bool = True,
     elo_override: dict[str, float] | None = None,
+    market_probs: dict[int, tuple] | None = None,
 ) -> dict:
     """Run the Monte Carlo simulation and return per-team stage/title probabilities.
 
@@ -268,6 +297,13 @@ def simulate(
     completed 2026 results; ``elo_override`` supplies ratings (e.g. reconstructed
     pre-tournament Elo) instead of ``teams.current_elo``. Together they produce the
     pre-tournament baseline forecast.
+
+    Step 8 market feature: ``market_probs`` maps a fixture's DB ``match_id`` to its
+    de-vigged ``(pH, pD, pA)``; for an unplayed priced **group** fixture the market is
+    blended into the outcome as an input-only feature (decision #6). ``None`` (the
+    default) reproduces today's behaviour exactly. Knockout fixtures are out of scope —
+    their pairings are generated mid-simulation and have no concrete ``match_id``
+    (``_play_knockout`` is the documented extension point once knockout rows are ingested).
 
     Returns ``{"n_sims", "seed", "teams": [{name, team_id, probs:{stage:p}}...]}``
     sorted by title probability descending.
@@ -291,7 +327,9 @@ def simulate(
     third_scores = np.empty((12, n))
     for gi, letter in enumerate(GROUP_LETTERS):
         gelo = elos[group_global[letter]]
-        w, r, t, tscore = _simulate_group(params, gelo, fixtures[letter], n, rng)
+        w, r, t, tscore = _simulate_group(
+            params, gelo, fixtures[letter], n, rng, market_probs=market_probs
+        )
         gg = group_global[letter]
         winner_idx[letter] = gg[w]
         runner_idx[letter] = gg[r]

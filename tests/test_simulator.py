@@ -147,6 +147,54 @@ def test_elo_override_changes_the_favourite(conn):
     assert res["teams"][0]["name"] == underdog  # huge override rating => clear favourite
 
 
+def _a_group_fixture_match_id(conn):
+    """Return (match_id, home_name, away_name) for one unplayed Group A fixture."""
+    a = load_groups()["A"]
+    row = conn.execute(
+        """
+        SELECT m.id AS id, h.name AS home, a.name AS away
+        FROM matches m JOIN teams h ON h.id = m.home JOIN teams a ON a.id = m.away
+        WHERE m.stage = 'FIFA World Cup' AND m.result IS NULL AND h.name = ? AND a.name = ?
+        """,
+        (a[0], a[1]),
+    ).fetchone()
+    return row["id"], row["home"], row["away"]
+
+
+def test_market_probs_none_matches_default(conn):
+    # The market feature is opt-in: passing market_probs=None must reproduce the
+    # default forecast byte-for-byte (graceful fallback / backward compatibility).
+    _build_wc_db(conn)
+    a = simulate(conn, n_sims=1500, seed=9)
+    b = simulate(conn, n_sims=1500, seed=9, market_probs=None)
+    assert {t["name"]: t["probs"] for t in a["teams"]} == {
+        t["name"]: t["probs"] for t in b["teams"]
+    }
+
+
+def test_market_probs_shifts_the_forecast(conn):
+    # An extreme de-vigged price on a real group fixture must lift the favoured team's
+    # advancement vs the no-override run under the same seed — the feature is wired in.
+    _build_wc_db(conn)
+    mid, home, away = _a_group_fixture_match_id(conn)
+    base = {t["name"]: t["probs"] for t in simulate(conn, n_sims=2500, seed=4)["teams"]}
+    # Force a near-certain home win for this fixture only.
+    skewed = {t["name"]: t["probs"] for t in
+              simulate(conn, n_sims=2500, seed=4,
+                       market_probs={mid: (0.99, 0.005, 0.005)})["teams"]}
+    assert skewed[home]["r32"] > base[home]["r32"]
+
+
+def test_market_probs_unknown_match_id_is_a_noop(conn):
+    # A match_id that is not in the bracket leaves the forecast identical (hypothetical
+    # knockout pairings / stray ids fall through to the fundamentals blend).
+    _build_wc_db(conn)
+    base = {t["name"]: t["probs"] for t in simulate(conn, n_sims=1500, seed=9)["teams"]}
+    out = {t["name"]: t["probs"] for t in
+           simulate(conn, n_sims=1500, seed=9, market_probs={999999: (0.9, 0.05, 0.05)})["teams"]}
+    assert base == out
+
+
 def test_write_predictions_persists_one_row_per_team(conn):
     _build_wc_db(conn)
     result = simulate(conn, n_sims=500, seed=1)

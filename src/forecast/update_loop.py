@@ -32,11 +32,26 @@ import hashlib
 import json
 import sqlite3
 
-from .config import BASELINE_RUN_ID, MODEL_VERSION, N_SIMS, SIM_SEED
+from .config import (
+    BASELINE_RUN_ID,
+    BLEND_WEIGHT,
+    BLEND_WEIGHTS_3,
+    MARKET_BLEND_WEIGHT,
+    MODEL_VERSION,
+    N_SIMS,
+    SIM_SEED,
+)
 from .loader import _scoreline, _team_id_map
+from .market import (
+    load_odds_json,
+    map_odds_to_matches,
+    market_probs_by_match_id,
+    resolve_odds_path,
+)
 from .match_model import fit_match_model
 from .ratings import pretournament_elos, replay_history
 from .simulator import simulate, write_predictions
+from .squad_strength import adjusted_elo_override, squad_elo_adjustments
 
 # WC2026 fixtures are tagged with this stage and fall on/after this date — the same
 # predicate the simulator uses to find the live bracket (§4.4).
@@ -90,46 +105,99 @@ def ingest_result(
 # ---------------------------------------------------------------------------
 # Deterministic, state-fingerprinted run_id
 # ---------------------------------------------------------------------------
-def _completed_wc_results(conn: sqlite3.Connection) -> list[tuple]:
-    """The played WC2026 results, in a stable order. The only moving part of state."""
+def _played_matches_digest(conn: sqlite3.Connection) -> str:
+    """SHA-256 over *every* played match's ``(id, result)``, in id order.
+
+    ``run_update`` rebuilds Elo and refits the model from every played match — not just
+    completed WC2026 games — so the forecast moves whenever any played result changes:
+    a newly-scored friendly or qualifier picked up by ``--reload``, or a historical
+    correction. Hashing the full played-match set (rather than only WC2026 results)
+    makes the fingerprint reflect the model's real input state, so such changes correctly
+    yield a new ``run_id`` and a new history entry instead of silently overwriting the
+    previous snapshot. Cheap relative to the Elo replay the update already performs.
+    """
     rows = conn.execute(
-        """
-        SELECT date, home, away, result
-        FROM matches
-        WHERE stage = ? AND date >= ? AND result IS NOT NULL
-        ORDER BY date, home, away
-        """,
-        (WC_STAGE, WC_DATE_FLOOR),
+        "SELECT id, result FROM matches WHERE result IS NOT NULL ORDER BY id"
     ).fetchall()
-    return [(r["date"], r["home"], r["away"], r["result"]) for r in rows]
+    blob = json.dumps([(r["id"], r["result"]) for r in rows],
+                      separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _market_digest(market_probs: dict | None):
+    """Stable, rounded representation of the active market feature for the fingerprint."""
+    if not market_probs:
+        return None
+    return sorted(
+        (int(mid), round(p[0], 6), round(p[1], 6), round(p[2], 6))
+        for mid, p in market_probs.items()
+    )
+
+
+def _squad_digest(squad_adj: dict | None):
+    """Stable, rounded representation of the active squad-strength nudges."""
+    if not squad_adj:
+        return None
+    return sorted((name, round(delta, 4)) for name, delta in squad_adj.items())
 
 
 def state_fingerprint(
-    conn: sqlite3.Connection, n_sims: int = N_SIMS, seed: int = SIM_SEED
+    conn: sqlite3.Connection,
+    n_sims: int = N_SIMS,
+    seed: int = SIM_SEED,
+    market_probs: dict | None = None,
+    squad_adj: dict | None = None,
 ) -> str:
     """Return a stable hex digest of everything that determines the forecast.
 
-    Hash material is the model version, ``n_sims``, ``seed``, and the sorted list of
-    completed WC2026 results. Historical (pre-2026) matches are static, so those
-    completed results are the only thing that changes during the tournament — hashing
-    them captures "the same state". A model-version or seed change correctly forces a
-    new fingerprint. Returns the first 16 hex chars of a SHA-256 digest.
+    Hash material is the model version, ``n_sims``, ``seed``, a digest of **all played
+    matches** (the model's leak-free fit input), the fixed blend configuration, and any
+    active optional inputs — the de-vigged market feature and the squad-strength nudges.
+    Two runs produce the same ``run_id`` iff they would produce the same forecast; any
+    change to a played result, the odds, the squad data, or a blend weight/version forces
+    a new fingerprint (and thus a new history snapshot). First 16 hex chars of SHA-256.
     """
     payload = {
         "model_version": MODEL_VERSION,
         "n_sims": n_sims,
         "seed": seed,
-        "results": _completed_wc_results(conn),
+        "matches": _played_matches_digest(conn),
+        "blend": {
+            "blend_weight": BLEND_WEIGHT,
+            "blend_weights_3": list(BLEND_WEIGHTS_3),
+            "market_blend_weight": MARKET_BLEND_WEIGHT,
+        },
+        "market": _market_digest(market_probs),
+        "squad": _squad_digest(squad_adj),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def compute_run_id(
-    conn: sqlite3.Connection, n_sims: int = N_SIMS, seed: int = SIM_SEED
+    conn: sqlite3.Connection,
+    n_sims: int = N_SIMS,
+    seed: int = SIM_SEED,
+    market_probs: dict | None = None,
+    squad_adj: dict | None = None,
 ) -> str:
     """The ``run_id`` for the current state — identical state ⇒ identical id."""
-    return state_fingerprint(conn, n_sims, seed)
+    return state_fingerprint(conn, n_sims, seed, market_probs, squad_adj)
+
+
+def live_market_probs(conn: sqlite3.Connection) -> dict | None:
+    """De-vigged ``{match_id: (pH,pD,pA)}`` for upcoming priced fixtures, or ``None``.
+
+    Uses **live** odds only (never the committed illustrative sample), so the production
+    forecast is market-aware only when real odds have been fetched; with no live odds
+    file the live path is byte-identical to before Step 8.
+    """
+    odds_path, _is_sample = resolve_odds_path(allow_sample=False)
+    if odds_path is None:
+        return None
+    matched = map_odds_to_matches(conn, load_odds_json(odds_path))
+    probs = market_probs_by_match_id(matched)
+    return probs or None
 
 
 # ---------------------------------------------------------------------------
@@ -141,14 +209,29 @@ def run_update(
     """Refresh the forecast and persist one snapshot for the current DB state.
 
     Steps (all deterministic): rebuild point-in-time Elo, refit the blended match model,
-    re-simulate the remaining bracket, and upsert one prediction row per team under the
-    deterministic ``run_id``. Returns a summary dict with the ``run_id``, the simulator
-    ``result``, the run parameters, and the replay summary.
+    gather any optional Step 8 inputs (de-vigged live market odds as an input-only
+    feature; opt-in squad-strength Elo nudges), re-simulate the remaining bracket, and
+    upsert one prediction row per team under the deterministic ``run_id``. The optional
+    inputs fold into the ``run_id`` fingerprint, so changing odds or squad data yields a
+    new history snapshot rather than overwriting the prior one. With no live odds and the
+    squad feature disabled (the defaults), behaviour is identical to before Step 8.
+    Returns a summary dict with the ``run_id``, the simulator ``result``, the run
+    parameters, the replay summary, and which optional inputs were active.
     """
     replayed = replay_history(conn)
     params = fit_match_model(conn)
-    run_id = compute_run_id(conn, n_sims, seed)
-    result = simulate(conn, n_sims=n_sims, seed=seed, params=params)
+    market_probs = live_market_probs(conn)
+    squad_adj = squad_elo_adjustments(conn)
+    elo_override = adjusted_elo_override(conn)
+    run_id = compute_run_id(conn, n_sims, seed, market_probs=market_probs, squad_adj=squad_adj)
+    result = simulate(
+        conn,
+        n_sims=n_sims,
+        seed=seed,
+        params=params,
+        elo_override=elo_override,
+        market_probs=market_probs,
+    )
     write_predictions(conn, result, run_id=run_id)
     return {
         "run_id": run_id,
@@ -156,6 +239,8 @@ def run_update(
         "n_sims": n_sims,
         "seed": seed,
         "replayed": replayed,
+        "market_matches": len(market_probs) if market_probs else 0,
+        "squad_teams": len(squad_adj) if squad_adj else 0,
     }
 
 

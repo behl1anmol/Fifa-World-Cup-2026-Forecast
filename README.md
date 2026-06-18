@@ -16,7 +16,8 @@ The project is built in steps following the architecture's §8 build sequence.
 - ✅ **Step 4 — Scoreline model & blend**
 - ✅ **Step 5 — Calibration harness**
 - ✅ **Step 6 — Update loop & snapshots**
-- ✅ **Step 7 — API & dashboard** *(this step)*
+- ✅ **Step 7 — API & dashboard**
+- ✅ **Step 8 — Feature polish: market-odds feature, squad strength, LightGBM** *(this step)*
 
 ## Layout
 
@@ -226,6 +227,41 @@ python scripts/dashboard.py                       # dashboard on http://127.0.0.
 
 After an update (`python scripts/update_loop.py --date … --home … --away … --score …`),
 the API and dashboard reflect the new numbers and last-updated timestamp.
+
+## Feature polish (Step 8)
+
+Optional polish that keeps the core untouched and is gated on **no calibration
+regression** versus the Step 5 baseline (`tests/baselines/step5_calibration.json`).
+
+- **Market odds as an input-only feature.** When **live** odds have been fetched
+  (`ODDS_API_KEY` set → `python scripts/fetch_data.py --source odds_api`), the update
+  loop de-vigs them and blends them into the simulator for the priced upcoming group
+  fixtures (`MARKET_BLEND_WEIGHT`). It is the strongest free *input*, never a
+  "beat-the-market" target (decision #6); the committed `*.sample.json` is used only by
+  the calibration harness, never the live forecast. The odds map folds into the snapshot
+  `run_id` fingerprint, so an odds change yields a new history entry.
+- **Squad-strength feature** (optional, cached, opt-in, `SQUAD_STRENGTH_ENABLED`): a
+  z-scored squad-value Elo nudge for the live 2026 sim, read from a cached
+  Transfermarkt extract. Never scraped here and never part of the historical backtest —
+  the core never depends on it (see `datasets/transfermarkt/`).
+- **Optional LightGBM third view** (`gbm_view.py`): a leak-free W/D/L classifier blended
+  with Dixon-Coles + Elo via a generalised fixed-weight blend (`match_model.blend_n`,
+  `predict3`). Degrades gracefully when `lightgbm` is absent — the core never imports it.
+- **Re-fit fixed blend weight.** `scripts/tune_blend_weight.py` grid-searches the fixed
+  blend weight(s) on held-out RPS (still fixed weights, not per-sample stacking,
+  decision #8); the chosen constants are committed in `config.py`
+  (`BLEND_WEIGHT = 0.6`, `BLEND_WEIGHTS_3 = (0.6, 0.2, 0.2)`).
+
+```bash
+export ODDS_API_KEY=...                           # optional: enables live odds
+python scripts/fetch_data.py --source odds_api    # fetch live WC2026 h2h odds
+python scripts/tune_blend_weight.py               # re-fit the fixed blend weight(s)
+python scripts/evaluate_calibration.py            # prints PASS/FAIL vs the Step 5 baseline
+python scripts/update_loop.py                     # market-aware live forecast
+```
+
+Acceptance check (held-out backtest < 2018-01-01): two-view RPS **0.1699** and
+three-view RPS **0.1698** both improve on the Step 5 baseline **0.1700** — no regression.
 
 ## Tests
 

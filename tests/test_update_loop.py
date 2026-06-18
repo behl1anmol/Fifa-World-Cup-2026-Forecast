@@ -17,6 +17,7 @@ from forecast.update_loop import (
     latest_snapshot,
     list_runs,
     run_update,
+    state_fingerprint,
 )
 
 # Small sim count keeps the suite quick while staying deterministic under a seed.
@@ -115,6 +116,47 @@ def test_same_state_same_run_id_and_rows(conn):
 def test_run_id_changes_with_seed(conn):
     _build_wc_db(conn)
     assert compute_run_id(conn, SIMS, 1) != compute_run_id(conn, SIMS, 2)
+
+
+def test_run_id_changes_when_a_non_wc_result_changes(conn):
+    # PR #6 fix: the fingerprint must capture *all* forecast inputs, not only completed
+    # WC2026 results. run_update refits Elo from every played match, so correcting a
+    # historical friendly (no new WC result) changes the forecast and must mint a new
+    # run_id rather than silently overwriting the prior snapshot.
+    _build_wc_db(conn)
+    before = compute_run_id(conn, SIMS, SEED)
+    # Flip one seeded pre-2026 friendly from a draw to a decisive result.
+    conn.execute(
+        "UPDATE matches SET result = '4:0' "
+        "WHERE stage = 'Friendly' AND result = '0:0' "
+        "AND id = (SELECT MIN(id) FROM matches WHERE stage = 'Friendly')"
+    )
+    conn.commit()
+    assert compute_run_id(conn, SIMS, SEED) != before
+
+
+def test_state_fingerprint_changes_with_market(conn):
+    # Same completed results, different de-vigged market map => different fingerprint,
+    # so an odds change yields a new history snapshot (the market feature is an input).
+    _build_wc_db(conn)
+    base = state_fingerprint(conn, SIMS, SEED)
+    with_market = state_fingerprint(conn, SIMS, SEED, market_probs={1: (0.7, 0.2, 0.1)})
+    other_market = state_fingerprint(conn, SIMS, SEED, market_probs={1: (0.4, 0.3, 0.3)})
+    assert base != with_market != other_market
+    assert base != other_market
+
+
+def test_run_update_no_live_odds_is_market_free(conn, monkeypatch):
+    # With no live odds file the live path stays market-free, so behaviour is unchanged
+    # from before Step 8. Pin the odds resolver to "no file" so the test is independent
+    # of whether a developer has fetched live odds into datasets/odds_api/.
+    import forecast.update_loop as ul
+
+    monkeypatch.setattr(ul, "resolve_odds_path", lambda allow_sample=True: (None, False))
+    _build_wc_db(conn)
+    out = run_update(conn, n_sims=SIMS, seed=SEED)
+    assert out["market_matches"] == 0
+    assert out["squad_teams"] == 0
 
 
 # --- History accumulates ----------------------------------------------------
