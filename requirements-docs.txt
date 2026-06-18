@@ -1,0 +1,6 @@
+# Documentation toolchain (kept separate from the app's requirements.txt).
+# Builds the docs/ Markdown into a GitHub Pages site with MkDocs + Material.
+# Material renders the Mermaid diagrams natively via pymdownx.superfences — no extra plugin.
+
+mkdocs-material>=9.5,<10
+pymdown-extensions>=10.7
